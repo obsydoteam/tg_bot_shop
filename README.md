@@ -1,114 +1,283 @@
 # OBSYDO VPN Telegram Shop Bot
 
-Готовый Telegram-бот-магазин для продажи VPN OBSYDO на базе Remnawave с оплатой через Telegram Stars (`XTR`).
+Продакшн-бот-магазин для продажи VPN через Telegram Stars (`XTR`) с интеграцией Remnawave, inline-админкой, выдачей/продлением подписок, ежедневными отчетами и фоновыми сверками.
 
-## Что реализовано
+---
 
-- Витрина тарифов в боте (`/plans`, кнопки покупки)
-- Оплата Telegram Stars через `sendInvoice` (`currency: XTR`)
-- Автоматическая выдача/продление доступа через Remnawave API
-- Хранение товаров, заказов, статусов платежей в SQLite
-- Админка в Telegram (`/admin`, управление товарами, история заказов)
-- Пробный период 1 час (`/trial` или кнопка в меню)
-- Уведомления о завершении подписки за 24 часа и за 1 час
-- Базовый тариф проекта: 200 ⭐ / 30 дней / 300 GB
-- Чистый UX: основные экраны обновляются через `editMessageText`, служебные ответы автоудаляются
-- Анти-фрод: проверки валюты/суммы/статуса заказа, защита от дубликатов и алерты админу
-- Расширенная админка: inline-панель + команды (`/stats`, `/orders`, `/finduser`, `/grantdays`, `/enable`, `/disable`, `/reset`, `/revoke`, `/delete`, `/broadcast`)
-- Inline редактирование тарифов (цена/срок/трафик/ON-OFF) + команды `/plansadmin`, `/setprice`, `/editplan`
-- Reconciliation: сверка оплаченных заказов с Remnawave по расписанию и автоисправление локального рассинхрона
-- Ежедневная сводка админу в 23:00 (МСК): заказы, доход, конверсия, trial, активные подписки, надежность
+## Возможности
 
-## Техническая база
+- Продажа тарифов в Telegram через инвойсы `XTR`.
+- Автоматическая выдача доступа в Remnawave после оплаты.
+- Продление подписки для существующих пользователей.
+- Пробный период 1 час (одноразово).
+- Напоминания об окончании подписки за 24 часа и за 1 час.
+- Reconciliation (сверка локальных данных и Remnawave).
+- Ежедневная сводка админу в 23:00 МСК.
+- Inline-first UX (минимум “мусора” в переписке).
+- Расширенная админка: поиск, действия по пользователю, редактирование тарифов.
+- Backup SQLite с ротацией.
+- Docker healthcheck.
 
-- Node.js + TypeScript + Telegraf
-- SQLite (`better-sqlite3`)
-- Интеграция с Remnawave API:
-  - `POST /api/auth/login`
-  - `GET /api/users/by-telegram-id/{telegramId}`
-  - `POST /api/users`
-  - `PATCH /api/users/{uuid}`
+---
 
-Если панель настроена на доступ только через API-token, задайте `REMNAWAVE_API_TOKEN` в `.env` (бот автоматически использует его вместо JWT-логина).
+## Рекомендуемые характеристики VPS
 
-## Быстрый старт (Docker)
+- Минимум: `1 vCPU / 1 GB RAM / 20 GB SSD`
+- Рекомендуемо: `2 vCPU / 2 GB RAM / 30-40 GB SSD`
+- ОС: Ubuntu 24.04 LTS (полностью поддерживается)
 
-1. Клонировать репозиторий:
+---
+
+## Архитектура
+
+- Язык/Runtime: Node.js + TypeScript
+- Фреймворк бота: Telegraf
+- Хранилище: SQLite (`better-sqlite3`)
+- Деплой: Docker + Docker Compose
+- Внешние сервисы:
+  - Telegram Bot API
+  - Remnawave API
+
+---
+
+## 1) Подготовка репозитория (локально)
+
+В корне проекта:
 
 ```bash
-git clone <YOUR_GIT_URL> obsydo-vpn && cd obsydo-vpn
+git init
+git add .
+git commit -m "Initial production-ready OBSYDO VPN bot"
+git branch -M main
+git remote add origin <YOUR_GIT_URL>
+git push -u origin main
 ```
 
-2. Создать `.env` и заполнить секреты:
+---
+
+## 2) Полный деплой на Ubuntu 24.04 (с нуля)
+
+### 2.1 Подключение к серверу
+
+```bash
+ssh root@<VPS_IP>
+```
+
+### 2.2 Обновление системы
+
+```bash
+apt update && apt upgrade -y
+apt install -y git curl ca-certificates gnupg lsb-release nano ufw
+```
+
+### 2.3 Установка Docker + Compose plugin
+
+```bash
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+apt update
+apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+docker --version
+docker compose version
+```
+
+### 2.4 Базовый firewall
+
+```bash
+ufw allow OpenSSH
+ufw --force enable
+ufw status
+```
+
+### 2.5 Клонирование проекта
+
+```bash
+cd /opt
+git clone <YOUR_GIT_URL> tg_bot_shop
+cd tg_bot_shop
+```
+
+### 2.6 Настройка `.env`
 
 ```bash
 cp .env.example .env
+nano .env
 ```
 
-3. Запуск одной командой:
+Обязательно заполнить:
+
+- `BOT_TOKEN`
+- `REMNAWAVE_BASE_URL`
+- `REMNAWAVE_API_TOKEN`
+- `ADMIN_TELEGRAM_IDS`
+- `SHOP_NAME`
+- `SUPPORT_LINK`
+
+### 2.7 Запуск
 
 ```bash
 sh deploy.sh
 ```
 
-Альтернатива через npm:
+Альтернатива:
 
 ```bash
-npm run docker:up
+docker compose up -d --build
+```
+
+### 2.8 Проверка
+
+```bash
+docker compose ps
+docker compose logs -f --tail=200
+```
+
+---
+
+## 3) Обновление версии на сервере
+
+```bash
+cd /opt/tg_bot_shop
+git pull
+docker compose up -d --build
+```
+
+---
+
+## 4) Основные команды эксплуатации
+
+Запуск:
+
+```bash
+docker compose up -d --build
+```
+
+Остановка:
+
+```bash
+docker compose down
+```
+
+Перезапуск:
+
+```bash
+docker compose restart
 ```
 
 Логи:
 
 ```bash
-npm run docker:logs
+docker compose logs -f --tail=200
 ```
 
-Проверка состояния контейнера:
+Статус:
 
 ```bash
 docker compose ps
 ```
 
-Healthcheck выполняется автоматически (`node dist/healthcheck.js`) и проверяет валидность `BOT_TOKEN` и доступность SQLite.
+---
 
-## Reconciliation
+## 5) Переменные окружения (`.env`)
 
-- Фоновая сверка запускается каждые `RECONCILE_INTERVAL_MINUTES` минут.
-- Проверяются оплаченные заказы (`PAID`) и сравниваются с фактическими данными Remnawave.
-- При расхождении бот автоматически обновляет локальные поля заказа (`uuid`, `shortUuid`, `subscriptionUrl`, `expiresAt`).
-- Если есть проблемы/исправления, админу отправляется отчет.
-- Ручной запуск: команда `/reconcile`.
+Смотрите `/.env.example`. Ключевые параметры:
 
-## Daily Summary (23:00 МСК)
+- `BOT_TOKEN`
+- `REMNAWAVE_BASE_URL`
+- `REMNAWAVE_API_TOKEN` (рекомендуемый способ авторизации)
+- `ADMIN_TELEGRAM_IDS`
+- `DATABASE_PATH`
+- `TIMEZONE=Europe/Moscow`
+- `RECONCILE_INTERVAL_MINUTES`
+- `RECONCILE_LIMIT`
+- `DB_BACKUP_DIR`
+- `DB_BACKUP_INTERVAL_MINUTES`
+- `DB_BACKUP_RETENTION_DAYS`
 
-- Автоотправка админу каждый день в 23:00 по Москве.
-- Сводка включает: новые/оплаченные заказы, доход в Stars, конверсию, trial, активные подписки, reconcile-статус, топ продаж и блок рисков.
-- Ручной запуск для проверки: `/dailyreport`.
+---
 
-## Надежность БД и сохранность заказов
+## 6) Как работает админка
 
-- SQLite настроен в режиме повышенной надежности: `WAL`, `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`.
-- На уровне БД добавлено уникальное ограничение для `payment_charge_id` (исключает дубль-списания/дубль-зачисления).
-- Фоновый backup запускается автоматически:
-  - интервал: `DB_BACKUP_INTERVAL_MINUTES` (по умолчанию 15 минут),
-  - директория: `DB_BACKUP_DIR` (по умолчанию `./backups`),
-  - хранение: `DB_BACKUP_RETENTION_DAYS` (по умолчанию 14 дней).
-- В `docker-compose` подключен персистентный том `./backups:/app/backups`.
+Основная точка входа: `/admin`
 
-## Важно по Stars
+### Inline-функции
 
-- Для Telegram Stars используется валюта `XTR`.
-- Бот отправляет инвойс через `provider_token: ""` и `currency: "XTR"`.
-- Цена в товарах хранится в Stars.
+- Статистика
+- Последние заказы
+- Тарифы (inline-редактирование: цена/дни/трафик/ON-OFF)
+- Инструкции
+- Поиск пользователя по telegramId
+- Рассылка
+- Действия по пользователю: enable/disable/reset/revoke/delete/+30 дней
 
-## Рекомендации для продакшна
+### Команды (fallback)
 
-- Хранить `.env` в секрете, не коммитить.
-- Ограничить доступ к серверу по firewall.
-- Использовать Docker restart policy (`unless-stopped` уже настроен).
-- Добавить резервное копирование `shop.db`.
-- Включить централизованные логи и алерты.
+- `/stats`
+- `/orders [N]`
+- `/finduser <telegramId>`
+- `/grantdays <telegramId> <days>`
+- `/enable <telegramId>`
+- `/disable <telegramId>`
+- `/reset <telegramId>`
+- `/revoke <telegramId>`
+- `/delete <telegramId>`
+- `/broadcast <text>`
+- `/plansadmin`
+- `/setprice <code> <stars>`
+- `/editplan <code>|<title>|<description>|<stars>|<days>|<trafficGb>`
+- `/reconcile`
+- `/dailyreport`
 
-## Документация Remnawave
+Опасные действия защищены подтверждением `Да/Нет`.
 
-- [Remnawave API](https://docs.rw/api/)
+---
+
+## 7) Надежность и сохранность данных
+
+- SQLite: `WAL`, `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`.
+- Уникальность `payment_charge_id` на уровне БД.
+- Фоновый backup БД с ротацией.
+- Reconciliation по расписанию + ручной запуск.
+- Daily summary в 23:00 МСК.
+- Healthcheck контейнера (`node dist/healthcheck.js`).
+
+---
+
+## 8) Безопасность (обязательно)
+
+- Никогда не коммитьте `.env`.
+- Не публикуйте вывод `docker compose config` (там видны секреты).
+- Ротируйте `BOT_TOKEN` и `REMNAWAVE_API_TOKEN` при подозрении на утечку.
+- Ограничьте доступ к серверу (firewall, SSH keys).
+
+---
+
+## 9) Troubleshooting
+
+Если контейнер не стартует:
+
+```bash
+docker compose logs -f --tail=300
+```
+
+Если `unhealthy`:
+
+```bash
+docker compose ps
+docker compose logs -f --tail=200
+```
+
+Проверьте:
+
+- валидность `BOT_TOKEN`
+- корректность `REMNAWAVE_BASE_URL`
+- рабочий `REMNAWAVE_API_TOKEN`
+- существование/доступность `PUBLIC` internal squad
+
+---
+
+## Документация
+
+- [Remnawave API](https://docs.rw/api)
