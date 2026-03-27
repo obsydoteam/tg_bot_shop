@@ -100,14 +100,11 @@ export class RemnawaveClient {
   }
 
   async getByTelegramId(telegramId: number): Promise<RemnawaveUser | null> {
-    // For paid lifecycle operations we must never accidentally target TRIAL users.
+    // Strict paid-only resolver: trial users are never used in paid lifecycle.
     const users = await this.getUsersByTelegramId(telegramId);
     if (!users.length) return null;
     const paidTagged = users.filter((u) => (u.tag ?? "").toUpperCase() === "PAID");
-    const bestPaidTagged = this.pickBestByExpiry(paidTagged);
-    if (bestPaidTagged) return bestPaidTagged;
-    const nonTrial = users.filter((u) => (u.tag ?? "").toUpperCase() !== "TRIAL");
-    return this.pickBestByExpiry(nonTrial);
+    return this.pickBestByExpiry(paidTagged);
   }
 
   async createUser(input: {
@@ -131,8 +128,22 @@ export class RemnawaveClient {
       trafficLimitStrategy: "MONTH",
       activeInternalSquads: [publicSquadUuid]
     };
-    const data = await this.request<RemnawaveObjResp<ApiUser>>("post", "/api/users", payload);
-    return this.mapUser(data.response);
+    try {
+      const data = await this.request<RemnawaveObjResp<ApiUser>>("post", "/api/users", payload);
+      return this.mapUser(data.response);
+    } catch (error: any) {
+      const errText = error?.response?.data ? JSON.stringify(error.response.data) : String(error?.message ?? "");
+      // A019: username already exists -> retry once with unique suffix.
+      if (!errText.includes("A019")) throw error;
+      const base = input.username.slice(0, 28);
+      const suffix = Math.random().toString(36).slice(2, 8);
+      const retryPayload = {
+        ...payload,
+        username: `${base}_${suffix}`.slice(0, 36)
+      };
+      const retryData = await this.request<RemnawaveObjResp<ApiUser>>("post", "/api/users", retryPayload);
+      return this.mapUser(retryData.response);
+    }
   }
 
   async extendExistingUser(user: RemnawaveUser, addDays: number, trafficLimitBytes: number): Promise<RemnawaveUser> {
@@ -171,11 +182,11 @@ export class RemnawaveClient {
     durationDays: number;
     trafficLimitBytes: number;
   }): Promise<RemnawaveUser> {
-    const existing = await this.getByTelegramId(input.telegramId);
-    if (!existing) {
-      return this.createUser(input);
+    const existingPaid = await this.getByTelegramId(input.telegramId);
+    if (existingPaid) {
+      return this.extendExistingUser(existingPaid, input.durationDays, input.trafficLimitBytes);
     }
-    return this.extendExistingUser(existing, input.durationDays, input.trafficLimitBytes);
+    return this.createUser(input);
   }
 
   async getByUuid(uuid: string): Promise<RemnawaveUser | null> {

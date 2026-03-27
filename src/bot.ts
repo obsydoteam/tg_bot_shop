@@ -3,6 +3,7 @@ import type { Context } from "telegraf";
 import { appConfig } from "./config.js";
 import { repo } from "./db.js";
 import { RemnawaveClient } from "./remnawave.js";
+import type { Order } from "./types.js";
 
 const rw = new RemnawaveClient();
 const bot = new Telegraf(appConfig.BOT_TOKEN);
@@ -17,7 +18,7 @@ type PendingAdminAction = {
   createdAt: number;
 };
 const pendingAdminActions = new Map<string, PendingAdminAction>();
-type AdminInputMode = "FIND_USER" | "BROADCAST";
+type AdminInputMode = "FIND_USER" | "FIND_ORDERS" | "BROADCAST";
 type AdminInputState = {
   adminId: number;
   mode: AdminInputMode;
@@ -30,7 +31,7 @@ function isAdmin(ctx: Context): boolean {
   return typeof tgId === "number" && appConfig.adminIds.includes(tgId);
 }
 
-function makeUsername(ctx: Context): string {
+function makeBaseUsername(ctx: Context): string {
   const tgId = String(ctx.from?.id ?? Date.now());
   const rawNick = (ctx.from?.username ?? "tg")
     .toLowerCase()
@@ -38,9 +39,17 @@ function makeUsername(ctx: Context): string {
     .replace(/_+/g, "_")
     .replace(/^_+|_+$/g, "");
   const nick = rawNick.length > 0 ? rawNick : "tg";
-  const maxNickLen = Math.max(3, 36 - tgId.length - 1); // "_" between nickname and id
-  const nickPart = nick.slice(0, maxNickLen);
-  return `${nickPart}_${tgId}`.slice(0, 36);
+  return `${nick}_${tgId}`;
+}
+
+function makeTrialUsername(ctx: Context): string {
+  const base = makeBaseUsername(ctx);
+  return `trial_${base}`.slice(0, 36);
+}
+
+function makePaidUsername(ctx: Context): string {
+  const base = makeBaseUsername(ctx);
+  return `paid_${base}`.slice(0, 36);
 }
 
 function formatTraffic(gb: number): string {
@@ -101,6 +110,12 @@ function hasActivePaidSubscription(telegramUserId: number): boolean {
   return new Date(latest.expiresAt).getTime() > Date.now();
 }
 
+function formatOrderLine(o: Order, withExpires = true): string {
+  const usernamePart = o.telegramUsername ? ` @${o.telegramUsername}` : "";
+  const expiresPart = withExpires ? ` | expires:${toMoscow(o.expiresAt)}` : "";
+  return `#${o.id} | ${o.status} | ${o.amountStars}⭐ | user:${o.telegramUserId}${usernamePart}${expiresPart}`;
+}
+
 function uiCard(title: string, lines: string[] = []): string {
   return [title, "", ...lines].join("\n");
 }
@@ -137,6 +152,7 @@ function adminCommandsHelpText(): string {
     "/admin - админ-панель\n" +
     "/stats - сводная статистика\n" +
     "/orders [N] - последние N заказов\n" +
+    "/findorders <telegramId|@username> - найти все заказы пользователя\n" +
     "/finduser <telegramId> - найти пользователя по Telegram ID\n" +
     "/plansadmin - список тарифов с code\n" +
     "/setprice <code> <stars> - изменить цену тарифа\n" +
@@ -148,6 +164,8 @@ function adminCommandsHelpText(): string {
     "/revoke <telegramId> - отозвать подписку (с подтверждением)\n" +
     "/delete <telegramId> - удалить пользователя (с подтверждением)\n" +
     "/resettrial <telegramId> - обнулить trial: удалить trial-запись и trial-пользователя в RW (с подтверждением)\n" +
+    "/retryprovision <orderId> - повторить выдачу для оплаченного, но невыданного заказа\n" +
+    "/recoverpaid <orderId> - аварийно восстановить зависший PENDING (если оплата реально прошла)\n" +
     "/broadcast <текст> - рассылка платным пользователям\n" +
     "/reconcile - ручная сверка с Remnawave\n" +
     "/dailyreport - ручная отправка ежедневной сводки"
@@ -158,7 +176,8 @@ function adminPanelKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("Статистика", "admin:stats"), Markup.button.callback("Последние заказы", "admin:orders")],
     [Markup.button.callback("Тарифы", "admin:products"), Markup.button.callback("Инструкции", "admin:help")],
-    [Markup.button.callback("Найти пользователя", "admin:user:lookup"), Markup.button.callback("Рассылка", "admin:broadcast:prompt")]
+    [Markup.button.callback("Найти пользователя", "admin:user:lookup"), Markup.button.callback("Найти заказы", "admin:orders:lookup")],
+    [Markup.button.callback("Рассылка", "admin:broadcast:prompt")]
   ]);
 }
 
@@ -605,7 +624,7 @@ bot.command("trial", async (ctx) => {
   try {
     const rwUser = await rw.createTrial({
       telegramId: ctx.from.id,
-      username: makeUsername(ctx),
+      username: makeTrialUsername(ctx),
       trialHours: appConfig.TRIAL_DURATION_HOURS
     });
     repo.saveTrial({
@@ -669,7 +688,7 @@ bot.action("trial:start", async (ctx) => {
   try {
     const rwUser = await rw.createTrial({
       telegramId: ctx.from.id,
-      username: makeUsername(ctx),
+      username: makeTrialUsername(ctx),
       trialHours: appConfig.TRIAL_DURATION_HOURS
     });
     repo.saveTrial({
@@ -758,6 +777,7 @@ bot.on("pre_checkout_query", async (ctx) => {
   }
   if (ctx.preCheckoutQuery.currency !== "XTR") {
     await notifyAdmins(`pre_checkout: invalid currency=${ctx.preCheckoutQuery.currency}, payload=${payload}`);
+    repo.markOrderFailed(order.payload);
     await ctx.answerPreCheckoutQuery(false, "Неверная валюта оплаты");
     return;
   }
@@ -765,6 +785,7 @@ bot.on("pre_checkout_query", async (ctx) => {
     await notifyAdmins(
       `pre_checkout: amount mismatch payload=${payload}, expected=${order.amountStars}, got=${ctx.preCheckoutQuery.total_amount}`
     );
+    repo.markOrderFailed(order.payload);
     await ctx.answerPreCheckoutQuery(false, "Некорректная сумма");
     return;
   }
@@ -801,7 +822,10 @@ bot.on("message", async (ctx, next) => {
 
   const product = repo.getProductById(order.productId);
   if (!product) {
-    repo.markOrderFailed(order.payload);
+    repo.markOrderProvisionFailed({
+      payload: order.payload,
+      paymentChargeId: payment.telegram_payment_charge_id
+    });
     await notifyAdmins(`product missing for paid order payload=${order.payload}, orderId=${order.id}`);
     await transientReply(ctx, "Платеж получен, но тариф не найден. Напишите в поддержку.");
     return;
@@ -817,7 +841,7 @@ bot.on("message", async (ctx, next) => {
       try {
         rwUser = await rw.provisionOrExtend({
           telegramId: ctx.from.id,
-          username: makeUsername(ctx),
+          username: makePaidUsername(ctx),
           durationDays: product.durationDays,
           trafficLimitBytes: trafficBytes
         });
@@ -863,7 +887,10 @@ bot.on("message", async (ctx, next) => {
       ])
     );
   } catch (error: any) {
-    repo.markOrderFailed(order.payload);
+    repo.markOrderProvisionFailed({
+      payload: order.payload,
+      paymentChargeId: payment.telegram_payment_charge_id
+    });
     await notifyAdmins(
       `provision failed for order=${order.id}, payload=${order.payload}, tg=${ctx.from.id}, err=${
         error?.response?.data ? JSON.stringify(error.response.data) : error?.message ?? "unknown"
@@ -921,6 +948,17 @@ bot.action("admin:user:lookup", async (ctx) => {
   );
 });
 
+bot.action("admin:orders:lookup", async (ctx) => {
+  if (!isAdmin(ctx) || !ctx.from) return;
+  await ctx.answerCbQuery();
+  setAdminInput(ctx.from.id, "FIND_ORDERS");
+  await upsertPanel(
+    ctx,
+    uiCard("🔎 Поиск заказов", ["Введите telegramId или @username одним сообщением."]),
+    Markup.inlineKeyboard([[Markup.button.callback("Отмена", "admin:home")]])
+  );
+});
+
 bot.action("admin:broadcast:prompt", async (ctx) => {
   if (!isAdmin(ctx) || !ctx.from) return;
   await ctx.answerCbQuery();
@@ -951,7 +989,7 @@ bot.action("admin:orders", async (ctx) => {
     "Последние 10 заказов:\n\n" +
     (orders.length
       ? orders
-          .map((o) => `#${o.id} | ${o.status} | ${o.amountStars}⭐ | user:${o.telegramUserId} | expires:${toMoscow(o.expiresAt)}`)
+          .map((o) => formatOrderLine(o, false))
           .join("\n")
       : "Нет заказов");
   await ctx.editMessageText(text, Markup.inlineKeyboard([[Markup.button.callback("Назад", "admin:home")]]));
@@ -1166,10 +1204,38 @@ bot.command("orders", async (ctx) => {
   const limit = Number.isFinite(n) ? Math.min(Math.max(n, 1), 50) : 10;
   const orders = repo.recentOrders(limit);
   const text = orders.length
-    ? orders
-        .map((o) => `#${o.id} ${o.status} ${o.amountStars}⭐ user:${o.telegramUserId} exp:${toMoscow(o.expiresAt)}`)
-        .join("\n")
+    ? orders.map((o) => formatOrderLine(o, false)).join("\n")
     : "Нет заказов";
+  await ctx.reply(text);
+});
+
+bot.command("findorders", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const query = (ctx.message.text.split(" ")[1] ?? "").trim();
+  if (!query) {
+    await ctx.reply("Формат: /findorders <telegramId|@username>");
+    return;
+  }
+  let orders: Order[] = [];
+  let title = "";
+  const maybeTgId = Number(query);
+  if (Number.isFinite(maybeTgId)) {
+    orders = repo.getOrdersByTelegramUserId(maybeTgId, 100);
+    title = `Заказы пользователя ${maybeTgId}`;
+  } else {
+    const username = query.replace(/^@+/, "");
+    if (!username) {
+      await ctx.reply("Укажите корректный username, например: /findorders @obsydo");
+      return;
+    }
+    orders = repo.getOrdersByTelegramUsername(username, 100);
+    title = `Заказы пользователя @${username}`;
+  }
+  const text =
+    `${title}:\n\n` +
+    (orders.length
+      ? orders.map((o) => formatOrderLine(o)).join("\n")
+      : "Ничего не найдено.");
   await ctx.reply(text);
 });
 
@@ -1214,6 +1280,31 @@ bot.on("text", async (ctx, next) => {
       }
     }
     await ctx.reply(`Рассылка завершена: ${sent}/${ids.length}`);
+    return;
+  }
+  if (state.mode === "FIND_ORDERS") {
+    clearAdminInput(ctx.from.id);
+    const query = text.trim();
+    let orders: Order[] = [];
+    let title = "";
+    const maybeTgId = Number(query);
+    if (Number.isFinite(maybeTgId)) {
+      orders = repo.getOrdersByTelegramUserId(maybeTgId, 100);
+      title = `Заказы пользователя ${maybeTgId}`;
+    } else {
+      const username = query.replace(/^@+/, "");
+      if (!username) {
+        await ctx.reply("Нужен telegramId или @username.");
+        return;
+      }
+      orders = repo.getOrdersByTelegramUsername(username, 100);
+      title = `Заказы пользователя @${username}`;
+    }
+    await upsertPanel(
+      ctx,
+      uiCard(title, orders.length ? orders.map((o) => formatOrderLine(o)) : ["Ничего не найдено."]),
+      Markup.inlineKeyboard([[Markup.button.callback("Назад", "admin:home")]])
+    );
     return;
   }
   return next();
@@ -1315,6 +1406,158 @@ bot.command("broadcast", async (ctx) => {
     }
   }
   await ctx.reply(`Рассылка завершена: ${sent}/${ids.length}`);
+});
+
+bot.command("retryprovision", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const orderId = Number(ctx.message.text.split(" ")[1]);
+  if (!Number.isFinite(orderId)) {
+    await ctx.reply("Формат: /retryprovision <orderId>");
+    return;
+  }
+  const order = repo.getOrderById(orderId);
+  if (!order) {
+    await ctx.reply("Заказ не найден.");
+    return;
+  }
+  if (!(order.status === "FAILED" && order.paymentChargeId && !order.remnawaveUserUuid)) {
+    await ctx.reply("Этот заказ не подходит для retryprovision (нужен FAILED с payment_charge_id и без выданного доступа).");
+    return;
+  }
+  const product = repo.getProductById(order.productId);
+  if (!product) {
+    await ctx.reply("Тариф заказа не найден.");
+    return;
+  }
+  await ctx.reply(`Повторяю выдачу для заказа #${order.id}...`);
+  try {
+    const hadActivePaidBeforePayment = hasActivePaidSubscription(order.telegramUserId);
+    const mockCtx = {
+      from: { id: order.telegramUserId, username: order.telegramUsername ?? undefined }
+    } as unknown as Context;
+    const trafficBytes = product.trafficLimitGb === 0 ? 0 : product.trafficLimitGb * 1024 * 1024 * 1024;
+    const rwUser = await rw.provisionOrExtend({
+      telegramId: order.telegramUserId,
+      username: makePaidUsername(mockCtx),
+      durationDays: product.durationDays,
+      trafficLimitBytes: trafficBytes
+    });
+    const updated = repo.finalizeProvisionedFailedOrder({
+      orderId: order.id,
+      remnawaveUserUuid: rwUser.uuid,
+      remnawaveShortUuid: rwUser.shortUuid,
+      subscriptionUrl: rwUser.subscriptionUrl,
+      expiresAt: rwUser.expireAt
+    });
+    if (!updated) {
+      await ctx.reply("Не удалось обновить заказ в БД (возможно, уже обработан).");
+      return;
+    }
+    repo.upsertTrafficCycleOnPayment({
+      telegramUserId: order.telegramUserId,
+      remnawaveUserUuid: rwUser.uuid,
+      resetAnchor: !hadActivePaidBeforePayment
+    });
+    await ctx.reply(`Готово. Заказ #${order.id} переведен в PAID и доступ выдан.`);
+    try {
+      await bot.telegram.sendMessage(
+        order.telegramUserId,
+        uiCard("✅ Доступ восстановлен", [
+          `Тариф: ${product.title}`,
+          `Действует до: ${toMoscow(rwUser.expireAt)} (МСК)`,
+          "",
+          "🔗 Ключ:",
+          rwUser.subscriptionUrl
+        ])
+      );
+    } catch {
+      // user may block bot; admin already informed
+    }
+  } catch (error: any) {
+    await ctx.reply(
+      `retryprovision error: ${
+        error?.response?.data ? JSON.stringify(error.response.data) : error?.message ?? "unknown"
+      }`
+    );
+  }
+});
+
+bot.command("recoverpaid", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const orderId = Number(ctx.message.text.split(" ")[1]);
+  if (!Number.isFinite(orderId)) {
+    await ctx.reply("Формат: /recoverpaid <orderId>");
+    return;
+  }
+  const order = repo.getOrderById(orderId);
+  if (!order) {
+    await ctx.reply("Заказ не найден.");
+    return;
+  }
+  if (order.status !== "PENDING") {
+    await ctx.reply("Команда работает только для заказов в статусе PENDING.");
+    return;
+  }
+  const product = repo.getProductById(order.productId);
+  if (!product) {
+    repo.markOrderFailed(order.payload);
+    await ctx.reply("Тариф не найден. Заказ переведен в FAILED.");
+    return;
+  }
+  await ctx.reply(
+    `Запускаю recovery для заказа #${order.id}. Используйте только если вы точно видите успешную оплату Stars в Telegram.`
+  );
+  try {
+    const hadActivePaidBeforePayment = hasActivePaidSubscription(order.telegramUserId);
+    const mockCtx = {
+      from: { id: order.telegramUserId, username: order.telegramUsername ?? undefined }
+    } as unknown as Context;
+    const trafficBytes = product.trafficLimitGb === 0 ? 0 : product.trafficLimitGb * 1024 * 1024 * 1024;
+    const rwUser = await rw.provisionOrExtend({
+      telegramId: order.telegramUserId,
+      username: makePaidUsername(mockCtx),
+      durationDays: product.durationDays,
+      trafficLimitBytes: trafficBytes
+    });
+    const recovered = repo.markOrderPaid({
+      payload: order.payload,
+      paymentChargeId: `MANUAL_RECOVERY_${order.id}_${Date.now()}`,
+      remnawaveUserUuid: rwUser.uuid,
+      remnawaveShortUuid: rwUser.shortUuid,
+      subscriptionUrl: rwUser.subscriptionUrl,
+      expiresAt: rwUser.expireAt
+    });
+    if (!recovered) {
+      await ctx.reply("Не удалось перевести заказ в PAID (возможно, уже обработан).");
+      return;
+    }
+    repo.upsertTrafficCycleOnPayment({
+      telegramUserId: order.telegramUserId,
+      remnawaveUserUuid: rwUser.uuid,
+      resetAnchor: !hadActivePaidBeforePayment
+    });
+    await ctx.reply(`Готово: заказ #${order.id} восстановлен и переведен в PAID.`);
+    try {
+      await bot.telegram.sendMessage(
+        order.telegramUserId,
+        uiCard("✅ Оплата подтверждена", [
+          `Тариф: ${product.title}`,
+          `Действует до: ${toMoscow(rwUser.expireAt)} (МСК)`,
+          "",
+          "🔗 Ключ:",
+          rwUser.subscriptionUrl
+        ])
+      );
+    } catch {
+      // user may block bot
+    }
+  } catch (error: any) {
+    await ctx.reply(
+      `recoverpaid error: ${
+        error?.response?.data ? JSON.stringify(error.response.data) : error?.message ?? "unknown"
+      }`
+    );
+  }
 });
 
 bot.command("reconcile", async (ctx) => {

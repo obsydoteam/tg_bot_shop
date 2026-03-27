@@ -366,6 +366,40 @@ export const repo = {
       payload
     );
   },
+  markOrderProvisionFailed(input: { payload: string; paymentChargeId: string }): void {
+    db.prepare(
+      "UPDATE orders SET status = 'FAILED', payment_charge_id = ?, updated_at = ? WHERE payload = ? AND status = 'PENDING'"
+    ).run(input.paymentChargeId, new Date().toISOString(), input.payload);
+  },
+  finalizeProvisionedFailedOrder(input: {
+    orderId: number;
+    remnawaveUserUuid: string;
+    remnawaveShortUuid: string;
+    subscriptionUrl: string;
+    expiresAt: string;
+  }): Order | null {
+    const info = db.prepare(`
+      UPDATE orders
+      SET status = 'PAID',
+          remnawave_user_uuid = ?,
+          remnawave_short_uuid = ?,
+          subscription_url = ?,
+          expires_at = ?,
+          updated_at = ?
+      WHERE id = ?
+        AND status = 'FAILED'
+        AND payment_charge_id IS NOT NULL
+    `).run(
+      input.remnawaveUserUuid,
+      input.remnawaveShortUuid,
+      input.subscriptionUrl,
+      input.expiresAt,
+      new Date().toISOString(),
+      input.orderId
+    );
+    if (info.changes === 0) return null;
+    return this.getOrderById(input.orderId);
+  },
   getPaidUserIds(): number[] {
     const rows = db
       .prepare("SELECT DISTINCT telegram_user_id FROM orders WHERE status = 'PAID'")
@@ -703,6 +737,22 @@ export const repo = {
     const rows = db
       .prepare("SELECT * FROM orders ORDER BY id DESC LIMIT ?")
       .all(limit);
+    return rows.map(mapOrder);
+  },
+  getOrdersByTelegramUserId(telegramUserId: number, limit = 100): Order[] {
+    const rows = db
+      .prepare("SELECT * FROM orders WHERE telegram_user_id = ? ORDER BY id DESC LIMIT ?")
+      .all(telegramUserId, limit);
+    return rows.map(mapOrder);
+  },
+  getOrdersByTelegramUsername(usernameRaw: string, limit = 100): Order[] {
+    const username = usernameRaw.trim().replace(/^@+/, "").toLowerCase();
+    if (!username) return [];
+    const rows = db
+      .prepare(
+        "SELECT * FROM orders WHERE telegram_username IS NOT NULL AND LOWER(telegram_username) = ? ORDER BY id DESC LIMIT ?"
+      )
+      .all(username, limit);
     return rows.map(mapOrder);
   },
   setOrderStatus(payload: string, status: OrderStatus): void {
