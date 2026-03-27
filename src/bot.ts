@@ -7,16 +7,6 @@ import { RemnawaveClient } from "./remnawave.js";
 const rw = new RemnawaveClient();
 const bot = new Telegraf(appConfig.BOT_TOKEN);
 const INVOICE_TTL_MINUTES = 10;
-const UI_BTN = {
-  USER_PLANS: "📦 Тарифы",
-  USER_PROFILE: "👤 Профиль",
-  USER_TRIAL: "🎁 Trial",
-  USER_HELP: "❓ Помощь",
-  ADMIN_HOME: "🛠 Админка",
-  ADMIN_FIND: "🔎 Найти",
-  ADMIN_STATS: "📊 Статистика",
-  ADMIN_BROADCAST: "📣 Рассылка"
-} as const;
 
 type AdminDangerAction = "ENABLE" | "DISABLE" | "RESET" | "REVOKE" | "DELETE" | "RESET_TRIAL" | "RESET_TRIAL_UNLOCK";
 type PendingAdminAction = {
@@ -115,26 +105,6 @@ function uiCard(title: string, lines: string[] = []): string {
   return [title, "", ...lines].join("\n");
 }
 
-function quickKeyboard(isAdminUser: boolean) {
-  const rows: string[][] = [
-    [UI_BTN.USER_PLANS, UI_BTN.USER_PROFILE],
-    [UI_BTN.USER_TRIAL, UI_BTN.USER_HELP]
-  ];
-  if (isAdminUser) {
-    rows.push([UI_BTN.ADMIN_HOME, UI_BTN.ADMIN_STATS]);
-    rows.push([UI_BTN.ADMIN_FIND, UI_BTN.ADMIN_BROADCAST]);
-  }
-  return Markup.keyboard(rows).resize().persistent();
-}
-
-async function syncQuickKeyboard(ctx: Context) {
-  if (!ctx.from || !ctx.chat) return;
-  const msg = await ctx.reply("⌨️", quickKeyboard(isAdmin(ctx)));
-  setTimeout(() => {
-    void safeDelete(ctx.chat!.id, msg.message_id);
-  }, 1200);
-}
-
 async function safeDelete(chatId: number, messageId: number) {
   try {
     await bot.telegram.deleteMessage(chatId, messageId);
@@ -186,8 +156,9 @@ function adminCommandsHelpText(): string {
 
 function adminPanelKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback("Последние заказы", "admin:orders"), Markup.button.callback("Тарифы", "admin:products")],
-    [Markup.button.callback("Инструкции", "admin:help")]
+    [Markup.button.callback("Статистика", "admin:stats"), Markup.button.callback("Последние заказы", "admin:orders")],
+    [Markup.button.callback("Тарифы", "admin:products"), Markup.button.callback("Инструкции", "admin:help")],
+    [Markup.button.callback("Найти пользователя", "admin:user:lookup"), Markup.button.callback("Рассылка", "admin:broadcast:prompt")]
   ]);
 }
 
@@ -480,7 +451,8 @@ function mainPanelText() {
 
 function mainPanelKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.url("Поддержка", appConfig.SUPPORT_LINK)]
+    [Markup.button.callback("Тарифы", "shop:list"), Markup.button.callback("Мой профиль", "sub:my")],
+    [Markup.button.callback("Пробный период", "trial:start"), Markup.button.callback("Помощь", "panel:help")]
   ]);
 }
 
@@ -599,7 +571,6 @@ async function upsertPanel(ctx: Context, text: string, keyboard: ReturnType<type
 }
 
 bot.start(async (ctx) => {
-  await syncQuickKeyboard(ctx);
   await upsertPanel(ctx, mainPanelText(), mainPanelKeyboard());
 });
 
@@ -908,99 +879,7 @@ bot.command("admin", async (ctx) => {
     await transientReply(ctx, "Недостаточно прав.");
     return;
   }
-  await syncQuickKeyboard(ctx);
   await upsertPanel(ctx, adminPanelText(), adminPanelKeyboard());
-});
-
-bot.hears(UI_BTN.USER_PLANS, async (ctx) => {
-  await renderPlansPanel(ctx);
-});
-
-bot.hears(UI_BTN.USER_PROFILE, async (ctx) => {
-  await renderProfilePanel(ctx);
-});
-
-bot.hears(UI_BTN.USER_HELP, async (ctx) => {
-  await renderHelpPanel(ctx);
-});
-
-bot.hears(UI_BTN.USER_TRIAL, async (ctx) => {
-  if (!ctx.from) return;
-  if (repo.hasUsedTrial(ctx.from.id)) {
-    await transientReply(ctx, "Пробный период уже был активирован ранее.");
-    return;
-  }
-  const latest = repo.getLatestPaidOrderForUser(ctx.from.id);
-  if (latest) {
-    await transientReply(ctx, "У вас уже есть покупка в системе, пробный период недоступен.");
-    return;
-  }
-  try {
-    const rwUser = await rw.createTrial({
-      telegramId: ctx.from.id,
-      username: makeUsername(ctx),
-      trialHours: appConfig.TRIAL_DURATION_HOURS
-    });
-    repo.saveTrial({
-      telegramUserId: ctx.from.id,
-      remnawaveUserUuid: rwUser.uuid,
-      expiresAt: rwUser.expireAt
-    });
-    await upsertPanel(
-      ctx,
-      uiCard("✅ Trial активирован", [
-        `Лимит: ${appConfig.TRIAL_DURATION_HOURS} ч / ${appConfig.TRIAL_TRAFFIC_GB} GB`,
-        `Действует до: ${toMoscow(rwUser.expireAt)} (МСК)`,
-        "",
-        "🔗 Ключ:",
-        rwUser.subscriptionUrl
-      ]),
-      Markup.inlineKeyboard([[Markup.button.callback("Главное меню", "panel:home")]])
-    );
-  } catch (error: any) {
-    await transientReply(ctx, "Не удалось активировать пробный период. Напишите в поддержку.");
-    console.error("Trial failed:", error?.response?.data ?? error?.message ?? error);
-  }
-});
-
-bot.hears(UI_BTN.ADMIN_HOME, async (ctx) => {
-  if (!isAdmin(ctx)) return;
-  await upsertPanel(ctx, adminPanelText(), adminPanelKeyboard());
-});
-
-bot.hears(UI_BTN.ADMIN_STATS, async (ctx) => {
-  if (!isAdmin(ctx)) return;
-  const s = repo.stats();
-  await upsertPanel(
-    ctx,
-    uiCard("📊 Статистика", [
-      `Оплачено: ${s.paid}`,
-      `В ожидании: ${s.pending}`,
-      `Выручка: ${s.totalRevenueStars} ⭐`,
-      `Тарифов: ${s.products}`
-    ]),
-    Markup.inlineKeyboard([[Markup.button.callback("Назад", "admin:home")]])
-  );
-});
-
-bot.hears(UI_BTN.ADMIN_FIND, async (ctx) => {
-  if (!isAdmin(ctx) || !ctx.from) return;
-  setAdminInput(ctx.from.id, "FIND_USER");
-  await upsertPanel(
-    ctx,
-    uiCard("🔎 Поиск пользователя", ["Введите telegramId одним сообщением."]),
-    Markup.inlineKeyboard([[Markup.button.callback("Отмена", "admin:home")]])
-  );
-});
-
-bot.hears(UI_BTN.ADMIN_BROADCAST, async (ctx) => {
-  if (!isAdmin(ctx) || !ctx.from) return;
-  setAdminInput(ctx.from.id, "BROADCAST");
-  await upsertPanel(
-    ctx,
-    uiCard("📣 Рассылка", ["Введите текст одним сообщением.", "Отправка: всем платным пользователям."]),
-    Markup.inlineKeyboard([[Markup.button.callback("Отмена", "admin:home")]])
-  );
 });
 
 bot.action("admin:stats", async (ctx) => {
