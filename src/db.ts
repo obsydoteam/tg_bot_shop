@@ -103,7 +103,6 @@ if (!orderColumnNames.has("invoice_expires_at")) {
   db.exec("ALTER TABLE orders ADD COLUMN invoice_expires_at TEXT;");
 }
 
-const monthPrice = appConfig.DEFAULT_PLAN_PRICE_STARS;
 const plansSeed: Array<{
   code: string;
   title: string;
@@ -116,23 +115,23 @@ const plansSeed: Array<{
     code: "OBSYDO_1M",
     title: "OBSYDO VPN 1 месяц",
     description: "1 месяц, 300 GB/мес, продление суммируется",
-    starsPrice: monthPrice,
+    starsPrice: 150,
     durationDays: 30,
     trafficLimitGb: appConfig.DEFAULT_TRAFFIC_GB
   },
   {
     code: "OBSYDO_3M",
-    title: "OBSYDO VPN 3 месяца (-5%)",
-    description: "3 месяца, 300 GB/мес, скидка 5%, продление суммируется",
-    starsPrice: Math.round(monthPrice * 3 * 0.95),
+    title: "OBSYDO VPN 3 месяца",
+    description: "3 месяца, 300 GB/мес, продление суммируется",
+    starsPrice: 400,
     durationDays: 90,
     trafficLimitGb: appConfig.DEFAULT_TRAFFIC_GB
   },
   {
     code: "OBSYDO_6M",
-    title: "OBSYDO VPN 6 месяцев (-10%)",
-    description: "6 месяцев, 300 GB/мес, скидка 10%, продление суммируется",
-    starsPrice: Math.round(monthPrice * 6 * 0.9),
+    title: "OBSYDO VPN 6 месяцев",
+    description: "6 месяцев, 300 GB/мес, продление суммируется",
+    starsPrice: 750,
     durationDays: 180,
     trafficLimitGb: appConfig.DEFAULT_TRAFFIC_GB
   }
