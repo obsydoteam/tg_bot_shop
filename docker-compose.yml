@@ -1,0 +1,16 @@
+services:
+  obsydo-vpn-bot:
+    build: .
+    container_name: obsydo-vpn-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./shop.db:/app/shop.db
+      - ./backups:/app/backups
+    healthcheck:
+      test: ["CMD", "node", "dist/healthcheck.js"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

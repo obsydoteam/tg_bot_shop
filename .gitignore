@@ -1,0 +1,7 @@
+.env
+shop.db
+stress-test.db
+backups/
+node_modules
+dist
+npm-debug.log
