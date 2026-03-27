@@ -600,7 +600,8 @@ function mainPanelText() {
 function mainPanelKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("Тарифы", "shop:list"), Markup.button.callback("Мой профиль", "sub:my")],
-    [Markup.button.callback("Пробный период", "trial:start"), Markup.button.callback("Помощь", "panel:help")]
+    [Markup.button.callback("Пробный период", "trial:start"), Markup.button.callback("Помощь", "panel:help")],
+    [Markup.button.callback("Инструкция", "panel:guide")]
   ]);
 }
 
@@ -651,6 +652,7 @@ async function renderProfilePanel(ctx: Context) {
     text,
     Markup.inlineKeyboard([
       [Markup.button.callback("Продлить", "shop:list")],
+      [Markup.button.callback("Инструкция", "panel:guide")],
       [Markup.button.callback("Назад", "panel:home")]
     ])
   );
@@ -680,7 +682,23 @@ async function renderHelpPanel(ctx: Context) {
     ctx,
     uiCard("❓ Помощь", ["Если нужна помощь с оплатой или подключением, напишите в поддержку."]),
     Markup.inlineKeyboard([
+      [Markup.button.callback("Инструкция по подключению", "panel:guide")],
       [Markup.button.url("Поддержка", appConfig.SUPPORT_LINK)],
+      [Markup.button.callback("Назад", "panel:home")]
+    ])
+  );
+}
+
+async function renderInstructionsPanel(ctx: Context) {
+  await upsertPanel(
+    ctx,
+    uiCard("📖 Как подключиться", [
+      "1) Откройте «Мой профиль» и скопируйте ссылку-ключ подписки (основной или trial).",
+      "2) Откройте эту ссылку в браузере: на странице будет инструкция, как импортировать профиль и подключиться в приложении.",
+      "3) Если страница не открывается — вставьте ссылку вручную в ваше VPN-приложение, следуя подсказкам на той же странице ключа."
+    ]),
+    Markup.inlineKeyboard([
+      [Markup.button.callback("Мой профиль", "sub:my")],
       [Markup.button.callback("Назад", "panel:home")]
     ])
   );
@@ -729,6 +747,7 @@ bot.command("help", async (ctx) => {
       "/plans — список тарифов",
       "/trial — пробный период (1 раз)",
       "/mysub — мой профиль и ключи",
+      "В меню также есть «Инструкция»: откройте ссылку-ключ — там шаги подключения.",
       "",
       "Для админа: /admin"
     ])
@@ -790,6 +809,11 @@ bot.action("sub:my", async (ctx) => {
 bot.action("panel:help", async (ctx) => {
   await ctx.answerCbQuery();
   await renderHelpPanel(ctx);
+});
+
+bot.action("panel:guide", async (ctx) => {
+  await ctx.answerCbQuery();
+  await renderInstructionsPanel(ctx);
 });
 
 bot.action("panel:home", async (ctx) => {
