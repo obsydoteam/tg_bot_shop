@@ -1,5 +1,6 @@
 .env
 shop.db
+shop.db-*
 stress-test.db
 backups/
 data/

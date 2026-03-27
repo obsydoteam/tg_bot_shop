@@ -101,6 +101,10 @@ function hasActivePaidSubscription(telegramUserId: number): boolean {
   return new Date(latest.expiresAt).getTime() > Date.now();
 }
 
+function uiCard(title: string, lines: string[] = []): string {
+  return [title, "", ...lines].join("\n");
+}
+
 async function safeDelete(chatId: number, messageId: number) {
   try {
     await bot.telegram.deleteMessage(chatId, messageId);
@@ -362,7 +366,7 @@ async function sendDailySummary(reportDateLabel: string, dayStartIso: string, da
 }
 
 function mainPanelText() {
-  return `┌ ${appConfig.SHOP_NAME}\n│\n│ Удобный и быстрый доступ к VPN\n└ Выберите раздел ниже`;
+  return uiCard(`✨ ${appConfig.SHOP_NAME}`, ["Быстрый доступ к управлению подпиской.", "Выберите раздел ниже."]);
 }
 
 function mainPanelKeyboard() {
@@ -412,10 +416,8 @@ async function renderProfilePanel(ctx: Context) {
     : "Нет активных платных ключей";
 
   const text =
-    `👤 Мой профиль\n\n` +
-    `🔑 Активные ключи\n` +
-    `${paidBlock}` +
-    `${trialLine}`;
+    uiCard("👤 Мой профиль", [`🔑 Активные ключи`, paidBlock]) +
+    `${trialLine ? `\n\n${trialLine}` : ""}`;
   await upsertPanel(
     ctx,
     text,
@@ -431,20 +433,24 @@ async function renderPlansPanel(ctx: Context) {
   if (!products.length) {
     await upsertPanel(
       ctx,
-      "📦 Сейчас нет доступных тарифов.",
+      uiCard("📦 Тарифы", ["Сейчас нет доступных тарифов."]),
       Markup.inlineKeyboard([[Markup.button.callback("Назад", "panel:home")]])
     );
     return;
   }
   const buttons = products.map((p) => [Markup.button.callback(`${p.title} - ${p.starsPrice} ⭐`, `shop:buy:${p.id}`)]);
   buttons.push([Markup.button.callback("Назад", "panel:home")]);
-  await upsertPanel(ctx, "📦 Выберите тариф\n\nПродление суммируется автоматически.", Markup.inlineKeyboard(buttons));
+  await upsertPanel(
+    ctx,
+    uiCard("📦 Тарифы", ["Выберите подходящий тариф.", "Продление подписки суммируется автоматически."]),
+    Markup.inlineKeyboard(buttons)
+  );
 }
 
 async function renderHelpPanel(ctx: Context) {
   await upsertPanel(
     ctx,
-    "❓ Помощь\n\nЕсли нужна помощь с оплатой или подключением, напишите в поддержку.",
+    uiCard("❓ Помощь", ["Если нужна помощь с оплатой или подключением, напишите в поддержку."]),
     Markup.inlineKeyboard([
       [Markup.button.url("Поддержка", appConfig.SUPPORT_LINK)],
       [Markup.button.callback("Назад", "panel:home")]
@@ -490,12 +496,14 @@ bot.start(async (ctx) => {
 
 bot.command("help", async (ctx) => {
   await ctx.reply(
-    "📚 Команды\n\n" +
-      "/start — главное меню\n" +
-      "/plans — список тарифов\n" +
-      "/trial — пробный период (1 раз)\n" +
-      "/mysub — мой профиль и ключи\n\n" +
-      "Для админа:\n/admin"
+    uiCard("📚 Команды", [
+      "/start — главное меню",
+      "/plans — список тарифов",
+      "/trial — пробный период (1 раз)",
+      "/mysub — мой профиль и ключи",
+      "",
+      "Для админа: /admin"
+    ])
   );
 });
 
@@ -527,10 +535,13 @@ bot.command("trial", async (ctx) => {
     });
     await upsertPanel(
       ctx,
-      `✅ Trial активирован\n\n` +
-        `Лимит: ${appConfig.TRIAL_DURATION_HOURS} ч / ${appConfig.TRIAL_TRAFFIC_GB} GB\n` +
-        `Действует до: ${toMoscow(rwUser.expireAt)} (МСК)\n\n` +
-        `🔗 Ключ:\n${rwUser.subscriptionUrl}`,
+      uiCard("✅ Trial активирован", [
+        `Лимит: ${appConfig.TRIAL_DURATION_HOURS} ч / ${appConfig.TRIAL_TRAFFIC_GB} GB`,
+        `Действует до: ${toMoscow(rwUser.expireAt)} (МСК)`,
+        "",
+        "🔗 Ключ:",
+        rwUser.subscriptionUrl
+      ]),
       Markup.inlineKeyboard([[Markup.button.callback("Главное меню", "panel:home")]])
     );
   } catch (error: any) {
@@ -588,10 +599,13 @@ bot.action("trial:start", async (ctx) => {
     });
     await upsertPanel(
       ctx,
-      `✅ Trial активирован\n\n` +
-        `Лимит: ${appConfig.TRIAL_DURATION_HOURS} ч / ${appConfig.TRIAL_TRAFFIC_GB} GB\n` +
-        `Действует до: ${toMoscow(rwUser.expireAt)} (МСК)\n\n` +
-        `🔗 Ключ:\n${rwUser.subscriptionUrl}`,
+      uiCard("✅ Trial активирован", [
+        `Лимит: ${appConfig.TRIAL_DURATION_HOURS} ч / ${appConfig.TRIAL_TRAFFIC_GB} GB`,
+        `Действует до: ${toMoscow(rwUser.expireAt)} (МСК)`,
+        "",
+        "🔗 Ключ:",
+        rwUser.subscriptionUrl
+      ]),
       Markup.inlineKeyboard([[Markup.button.callback("Главное меню", "panel:home")]])
     );
   } catch (error: any) {
@@ -633,9 +647,10 @@ bot.action(/^shop:buy:(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   await upsertPanel(
     ctx,
-    `🧾 Счет выставлен\n\n` +
-      `Срок оплаты: ${INVOICE_TTL_MINUTES} минут\n` +
-      `После оплаты доступ активируется автоматически.`,
+    uiCard("🧾 Счет выставлен", [
+      `Срок оплаты: ${INVOICE_TTL_MINUTES} минут`,
+      "После оплаты доступ активируется автоматически."
+    ]),
     Markup.inlineKeyboard([[Markup.button.callback("Назад", "panel:home")]])
   );
 });
@@ -755,10 +770,13 @@ bot.on("message", async (ctx, next) => {
 
     await upsertPanel(
       ctx,
-      "✅ Оплата прошла успешно\n\n" +
-        `Тариф: ${product.title}\n` +
-        `Действует до: ${toMoscow(rwUser.expireAt)} (МСК)\n\n` +
-        `🔗 Ключ:\n${rwUser.subscriptionUrl}`,
+      uiCard("✅ Оплата прошла успешно", [
+        `Тариф: ${product.title}`,
+        `Действует до: ${toMoscow(rwUser.expireAt)} (МСК)`,
+        "",
+        "🔗 Ключ:",
+        rwUser.subscriptionUrl
+      ]),
       Markup.inlineKeyboard([
         [Markup.button.callback("Мой профиль", "sub:my")],
         [Markup.button.callback("Главное меню", "panel:home")]
@@ -783,11 +801,12 @@ bot.command("admin", async (ctx) => {
   }
   const stats = repo.stats();
   await ctx.reply(
-    "🛠 Админ-панель\n\n" +
-      `Тарифов: ${stats.products}\n` +
-      `Оплачено: ${stats.paid}\n` +
-      `Ожидают: ${stats.pending}\n` +
-      `Выручка: ${stats.totalRevenueStars} ⭐`,
+    uiCard("🛠 Админ-панель", [
+      `Тарифов: ${stats.products}`,
+      `Оплачено: ${stats.paid}`,
+      `Ожидают: ${stats.pending}`,
+      `Выручка: ${stats.totalRevenueStars} ⭐`
+    ]),
     adminPanelKeyboard()
   );
 });
@@ -797,7 +816,12 @@ bot.action("admin:stats", async (ctx) => {
   await ctx.answerCbQuery();
   const s = repo.stats();
   await ctx.reply(
-    `📊 Статистика\n\nОплачено: ${s.paid}\nВ ожидании: ${s.pending}\nВыручка: ${s.totalRevenueStars}⭐\nТарифов: ${s.products}`,
+    uiCard("📊 Статистика", [
+      `Оплачено: ${s.paid}`,
+      `В ожидании: ${s.pending}`,
+      `Выручка: ${s.totalRevenueStars} ⭐`,
+      `Тарифов: ${s.products}`
+    ]),
     adminPanelKeyboard()
   );
 });
@@ -859,11 +883,12 @@ bot.action("admin:home", async (ctx) => {
   await ctx.answerCbQuery();
   const stats = repo.stats();
   await ctx.reply(
-    "Админ-панель:\n" +
-      `- Тарифов: ${stats.products}\n` +
-      `- Оплачено: ${stats.paid}\n` +
-      `- Ожидают: ${stats.pending}\n` +
-      `- Выручка: ${stats.totalRevenueStars} ⭐`,
+    uiCard("🛠 Админ-панель", [
+      `Тарифов: ${stats.products}`,
+      `Оплачено: ${stats.paid}`,
+      `Ожидают: ${stats.pending}`,
+      `Выручка: ${stats.totalRevenueStars} ⭐`
+    ]),
     adminPanelKeyboard()
   );
 });
@@ -1085,10 +1110,13 @@ bot.command("finduser", async (ctx) => {
   const latest = repo.getLatestPaidOrderForUser(tgId);
   const rwUser = await rw.getByTelegramId(tgId);
   const trial = repo.getTrialByTelegramId(tgId);
+  const trialRwUser = trial ? await rw.getByUuid(trial.remnawaveUserUuid).catch(() => null) : null;
   await ctx.reply(
     `Пользователь ${tgId}\n` +
-      `- RW UUID: ${rwUser?.uuid ?? "-"}\n` +
+      `- PAID UUID: ${rwUser?.uuid ?? "-"}\n` +
+      `- TRIAL UUID: ${trial?.remnawaveUserUuid ?? "-"}\n` +
       `- До: ${toMoscow(rwUser?.expireAt ?? latest?.expiresAt ?? null)}\n` +
+      `- Trial до: ${toMoscow(trialRwUser?.expireAt ?? trial?.expiresAt ?? null)}\n` +
       `- Последний заказ: ${latest ? `#${latest.id} ${latest.status} ${latest.amountStars}⭐` : "нет"}\n` +
       `- Trial в БД: ${trial ? "да" : "нет"}`,
     Markup.inlineKeyboard([
@@ -1125,10 +1153,13 @@ bot.on("text", async (ctx, next) => {
     const latest = repo.getLatestPaidOrderForUser(tgId);
     const rwUser = await rw.getByTelegramId(tgId);
     const trial = repo.getTrialByTelegramId(tgId);
+    const trialRwUser = trial ? await rw.getByUuid(trial.remnawaveUserUuid).catch(() => null) : null;
     await ctx.reply(
       `Пользователь ${tgId}\n` +
-        `- RW UUID: ${rwUser?.uuid ?? "-"}\n` +
+        `- PAID UUID: ${rwUser?.uuid ?? "-"}\n` +
+        `- TRIAL UUID: ${trial?.remnawaveUserUuid ?? "-"}\n` +
         `- До: ${toMoscow(rwUser?.expireAt ?? latest?.expiresAt ?? null)}\n` +
+        `- Trial до: ${toMoscow(trialRwUser?.expireAt ?? trial?.expiresAt ?? null)}\n` +
         `- Последний заказ: ${latest ? `#${latest.id} ${latest.status} ${latest.amountStars}⭐` : "нет"}\n` +
         `- Trial в БД: ${trial ? "да" : "нет"}`,
       Markup.inlineKeyboard([
@@ -1374,6 +1405,7 @@ export async function launchBot() {
   await bot.launch();
   startPendingInvoiceCleanupLoop();
   startTrafficCycleResetLoop();
+  startExpiredUsersCleanupLoop();
   startExpiryReminderLoop();
   startReconciliationLoop();
   startDailySummaryLoop();
@@ -1411,6 +1443,61 @@ function startTrafficCycleResetLoop() {
   setInterval(() => {
     void run();
   }, 5 * 60 * 1000);
+}
+
+function startExpiredUsersCleanupLoop() {
+  const run = async () => {
+    const now = Date.now();
+    const trialCutoffIso = new Date(now - 60 * 1000).toISOString();
+    const paidCutoffIso = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+
+    const trialsToDelete = repo.getTrialsDueForAutoDelete(trialCutoffIso);
+    for (const trial of trialsToDelete) {
+      // Trial cleanup must target only the exact trial account UUID from trials table.
+      // Do not infer target by telegramId and do not touch paid lifecycle entities here.
+      try {
+        await rw.deleteUser(trial.remnawaveUserUuid);
+      } catch (error: any) {
+        if (Number(error?.response?.status) !== 404) {
+          await notifyAdmins(
+            `trial cleanup failed: tg=${trial.telegramUserId}, uuid=${trial.remnawaveUserUuid}, err=${
+              error?.response?.data ? JSON.stringify(error.response.data) : error?.message ?? "unknown"
+            }`
+          );
+          continue;
+        }
+      }
+      repo.deleteTrialByTelegramId(trial.telegramUserId);
+    }
+
+    const paidToDelete = repo.getPaidUsersDueForAutoDelete(paidCutoffIso);
+    for (const user of paidToDelete) {
+      if (hasActivePaidSubscription(user.telegramUserId)) continue;
+      const remote = await rw.getByUuid(user.remnawaveUserUuid).catch(() => null);
+      if (remote?.expireAt && new Date(remote.expireAt).getTime() > Date.now()) {
+        // Remote is still active: avoid deleting from stale local snapshot.
+        continue;
+      }
+      try {
+        await rw.deleteUser(user.remnawaveUserUuid);
+      } catch (error: any) {
+        if (Number(error?.response?.status) !== 404) {
+          await notifyAdmins(
+            `paid cleanup failed: tg=${user.telegramUserId}, uuid=${user.remnawaveUserUuid}, err=${
+              error?.response?.data ? JSON.stringify(error.response.data) : error?.message ?? "unknown"
+            }`
+          );
+          continue;
+        }
+      }
+      repo.deleteTrafficCycleByTelegramId(user.telegramUserId);
+    }
+  };
+
+  void run();
+  setInterval(() => {
+    void run();
+  }, 60 * 1000);
 }
 
 function startPendingInvoiceCleanupLoop() {

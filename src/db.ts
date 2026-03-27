@@ -46,6 +46,11 @@ CREATE TABLE IF NOT EXISTS trials (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS trial_usage (
+  telegram_user_id INTEGER PRIMARY KEY,
+  used_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS traffic_cycles (
   telegram_user_id INTEGER PRIMARY KEY,
   remnawave_user_uuid TEXT NOT NULL,
@@ -82,6 +87,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_payment_charge_id ON orders(payment_charge
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_orders_payment_charge_id_not_null ON orders(payment_charge_id) WHERE payment_charge_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_orders_rw_uuid ON orders(remnawave_user_uuid);
 CREATE INDEX IF NOT EXISTS idx_trials_created_at ON trials(created_at);
+CREATE INDEX IF NOT EXISTS idx_trials_expires_at ON trials(expires_at);
 CREATE INDEX IF NOT EXISTS idx_traffic_cycles_next_reset_at ON traffic_cycles(next_reset_at);
 `);
 
@@ -150,6 +156,11 @@ for (const p of plansSeed) {
 // and produce a duplicate "1 month / 30 days" offer in user shop.
 // Keep it in DB history, but disable in storefront.
 db.prepare("UPDATE products SET is_active = 0 WHERE code = ?").run("OBSYDO_MONTH_200");
+db.prepare(`
+  INSERT OR IGNORE INTO trial_usage (telegram_user_id, used_at)
+  SELECT telegram_user_id, COALESCE(created_at, expires_at, ?)
+  FROM trials
+`).run(new Date().toISOString());
 
 function mapProduct(row: any): Product {
   return {
@@ -450,7 +461,11 @@ export const repo = {
     return rows.map(mapOrder);
   },
   hasUsedTrial(telegramUserId: number): boolean {
-    const row = db.prepare("SELECT 1 as ok FROM trials WHERE telegram_user_id = ?").get(telegramUserId) as
+    const row = db
+      .prepare(
+        "SELECT 1 as ok FROM trial_usage WHERE telegram_user_id = ? UNION SELECT 1 as ok FROM trials WHERE telegram_user_id = ? LIMIT 1"
+      )
+      .get(telegramUserId, telegramUserId) as
       | { ok: number }
       | undefined;
     return Boolean(row?.ok);
@@ -476,6 +491,27 @@ export const repo = {
   },
   deleteTrialByTelegramId(telegramUserId: number): void {
     db.prepare("DELETE FROM trials WHERE telegram_user_id = ?").run(telegramUserId);
+  },
+  getTrialsDueForAutoDelete(cutoffIso: string): Trial[] {
+    const rows = db
+      .prepare(
+        `SELECT telegram_user_id, remnawave_user_uuid, expires_at, created_at
+         FROM trials
+         WHERE expires_at <= ?
+         ORDER BY expires_at ASC`
+      )
+      .all(cutoffIso) as Array<{
+      telegram_user_id: number;
+      remnawave_user_uuid: string;
+      expires_at: string;
+      created_at: string;
+    }>;
+    return rows.map((row) => ({
+      telegramUserId: row.telegram_user_id,
+      remnawaveUserUuid: row.remnawave_user_uuid,
+      expiresAt: row.expires_at,
+      createdAt: row.created_at
+    }));
   },
   upsertTrafficCycleOnPayment(input: {
     telegramUserId: number;
@@ -557,11 +593,49 @@ export const repo = {
   deleteTrafficCycleByTelegramId(telegramUserId: number): void {
     db.prepare("DELETE FROM traffic_cycles WHERE telegram_user_id = ?").run(telegramUserId);
   },
+  getPaidUsersDueForAutoDelete(cutoffIso: string): Array<{
+    telegramUserId: number;
+    remnawaveUserUuid: string;
+    expiresAt: string;
+  }> {
+    const rows = db
+      .prepare(
+        `SELECT o.telegram_user_id, o.remnawave_user_uuid, o.expires_at
+         FROM orders o
+         JOIN (
+           SELECT telegram_user_id, MAX(expires_at) AS max_exp
+           FROM orders
+           WHERE status = 'PAID' AND expires_at IS NOT NULL
+           GROUP BY telegram_user_id
+         ) m
+           ON m.telegram_user_id = o.telegram_user_id
+          AND m.max_exp = o.expires_at
+         WHERE o.status = 'PAID'
+           AND o.remnawave_user_uuid IS NOT NULL
+           AND o.expires_at IS NOT NULL
+           AND o.expires_at <= ?`
+      )
+      .all(cutoffIso) as Array<{
+      telegram_user_id: number;
+      remnawave_user_uuid: string;
+      expires_at: string;
+    }>;
+    return rows.map((row) => ({
+      telegramUserId: row.telegram_user_id,
+      remnawaveUserUuid: row.remnawave_user_uuid,
+      expiresAt: row.expires_at
+    }));
+  },
   saveTrial(input: { telegramUserId: number; remnawaveUserUuid: string; expiresAt: string }): void {
+    const nowIso = new Date().toISOString();
+    db.prepare(`
+      INSERT OR IGNORE INTO trial_usage (telegram_user_id, used_at)
+      VALUES (?, ?)
+    `).run(input.telegramUserId, nowIso);
     db.prepare(`
       INSERT INTO trials (telegram_user_id, remnawave_user_uuid, expires_at, created_at)
       VALUES (?, ?, ?, ?)
-    `).run(input.telegramUserId, input.remnawaveUserUuid, input.expiresAt, new Date().toISOString());
+    `).run(input.telegramUserId, input.remnawaveUserUuid, input.expiresAt, nowIso);
   },
   getPaidOrdersForReminders(): Order[] {
     const rows = db

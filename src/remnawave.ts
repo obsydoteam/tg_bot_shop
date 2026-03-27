@@ -9,6 +9,7 @@ type ApiUser = {
   uuid: string;
   shortUuid: string;
   username: string;
+  tag?: string | null;
   expireAt: string;
   subscriptionUrl: string;
   trafficLimitBytes: number;
@@ -81,11 +82,19 @@ export class RemnawaveClient {
     }
   }
 
-  async getByTelegramId(telegramId: number): Promise<RemnawaveUser | null> {
+  private async getUsersByTelegramId(telegramId: number): Promise<RemnawaveUser[]> {
     const data = await this.request<RemnawaveListResp<ApiUser>>("get", `/api/users/by-telegram-id/${telegramId}`);
-    if (!data.response.length) return null;
-    const u = data.response[0];
-    return this.mapUser(u);
+    return (data.response ?? []).map((u) => this.mapUser(u));
+  }
+
+  async getByTelegramId(telegramId: number): Promise<RemnawaveUser | null> {
+    // For paid lifecycle operations we must never accidentally target TRIAL users.
+    const users = await this.getUsersByTelegramId(telegramId);
+    if (!users.length) return null;
+    const paidTagged = users.find((u) => (u.tag ?? "").toUpperCase() === "PAID");
+    if (paidTagged) return paidTagged;
+    const nonTrial = users.find((u) => (u.tag ?? "").toUpperCase() !== "TRIAL");
+    return nonTrial ?? null;
   }
 
   async createUser(input: {
@@ -102,6 +111,7 @@ export class RemnawaveClient {
     const payload = {
       username: input.username,
       telegramId: input.telegramId,
+      tag: "PAID",
       expireAt,
       trafficLimitBytes: input.trafficLimitBytes,
       hwidDeviceLimit: appConfig.DEFAULT_HARDWARE_LIMIT,
@@ -116,15 +126,30 @@ export class RemnawaveClient {
     const currentExpiry = new Date(user.expireAt).getTime();
     const from = Math.max(currentExpiry, Date.now());
     const expireAt = new Date(from + addDays * 24 * 60 * 60 * 1000).toISOString();
-    const payload = {
+    const payloadWithTag = {
       uuid: user.uuid,
+      tag: "PAID",
       expireAt,
       trafficLimitBytes,
       trafficLimitStrategy: "MONTH",
       hwidDeviceLimit: appConfig.DEFAULT_HARDWARE_LIMIT
     };
-    const data = await this.request<RemnawaveObjResp<ApiUser>>("patch", "/api/users", payload);
-    return this.mapUser(data.response);
+    try {
+      const data = await this.request<RemnawaveObjResp<ApiUser>>("patch", "/api/users", payloadWithTag);
+      return this.mapUser(data.response);
+    } catch (error: any) {
+      const status = Number(error?.response?.status ?? 0);
+      if (status !== 400 && status !== 422) throw error;
+      const payloadWithoutTag = {
+        uuid: user.uuid,
+        expireAt,
+        trafficLimitBytes,
+        trafficLimitStrategy: "MONTH",
+        hwidDeviceLimit: appConfig.DEFAULT_HARDWARE_LIMIT
+      };
+      const data = await this.request<RemnawaveObjResp<ApiUser>>("patch", "/api/users", payloadWithoutTag);
+      return this.mapUser(data.response);
+    }
   }
 
   async provisionOrExtend(input: {
@@ -212,6 +237,7 @@ export class RemnawaveClient {
       uuid: u.uuid,
       shortUuid: u.shortUuid,
       username: u.username,
+      tag: u.tag ?? null,
       expireAt: u.expireAt,
       subscriptionUrl: u.subscriptionUrl,
       trafficLimitBytes: u.trafficLimitBytes

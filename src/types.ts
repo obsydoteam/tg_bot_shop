@@ -44,6 +44,7 @@ export type RemnawaveUser = {
   uuid: string;
   shortUuid: string;
   username: string;
+  tag?: string | null;
   expireAt: string;
   subscriptionUrl: string;
   trafficLimitBytes: number;
