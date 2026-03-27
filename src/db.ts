@@ -492,6 +492,9 @@ export const repo = {
   deleteTrialByTelegramId(telegramUserId: number): void {
     db.prepare("DELETE FROM trials WHERE telegram_user_id = ?").run(telegramUserId);
   },
+  deleteTrialUsageByTelegramId(telegramUserId: number): void {
+    db.prepare("DELETE FROM trial_usage WHERE telegram_user_id = ?").run(telegramUserId);
+  },
   getTrialsDueForAutoDelete(cutoffIso: string): Trial[] {
     const rows = db
       .prepare(

@@ -1388,6 +1388,7 @@ bot.action(/^admin:confirm:([a-z0-9]+):(yes|no)$/, async (ctx) => {
         if (Number(error?.response?.status) !== 404) throw error;
       }
       repo.deleteTrialByTelegramId(pending.targetTelegramId);
+      repo.deleteTrialUsageByTelegramId(pending.targetTelegramId);
     }
     await ctx.reply(`Выполнено: ${pending.action} для telegramId ${pending.targetTelegramId}.`);
   } catch (error: any) {
