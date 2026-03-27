@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { appConfig } from "./config.js";
-import type { Order, OrderStatus, Product, ReminderType } from "./types.js";
+import type { Order, OrderStatus, Product, ReminderType, Trial } from "./types.js";
 
 const db = new Database(appConfig.DATABASE_PATH);
 
@@ -46,6 +46,15 @@ CREATE TABLE IF NOT EXISTS trials (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS traffic_cycles (
+  telegram_user_id INTEGER PRIMARY KEY,
+  remnawave_user_uuid TEXT NOT NULL,
+  anchor_at TEXT NOT NULL,
+  next_reset_at TEXT NOT NULL,
+  last_reset_at TEXT,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS reminder_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   order_id INTEGER NOT NULL,
@@ -73,6 +82,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_payment_charge_id ON orders(payment_charge
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_orders_payment_charge_id_not_null ON orders(payment_charge_id) WHERE payment_charge_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_orders_rw_uuid ON orders(remnawave_user_uuid);
 CREATE INDEX IF NOT EXISTS idx_trials_created_at ON trials(created_at);
+CREATE INDEX IF NOT EXISTS idx_traffic_cycles_next_reset_at ON traffic_cycles(next_reset_at);
 `);
 
 const orderColumns = db.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>;
@@ -87,35 +97,54 @@ if (!orderColumnNames.has("invoice_expires_at")) {
   db.exec("ALTER TABLE orders ADD COLUMN invoice_expires_at TEXT;");
 }
 
-const basePlanCode = "OBSYDO_MONTH_200";
-const basePlan = db.prepare("SELECT id FROM products WHERE code = ?").get(basePlanCode) as { id: number } | undefined;
-if (!basePlan) {
+const monthPrice = appConfig.DEFAULT_PLAN_PRICE_STARS;
+const plansSeed: Array<{
+  code: string;
+  title: string;
+  description: string;
+  starsPrice: number;
+  durationDays: number;
+  trafficLimitGb: number;
+}> = [
+  {
+    code: "OBSYDO_1M",
+    title: "OBSYDO VPN 1 месяц",
+    description: "1 месяц, 300 GB/мес, продление суммируется",
+    starsPrice: monthPrice,
+    durationDays: 30,
+    trafficLimitGb: appConfig.DEFAULT_TRAFFIC_GB
+  },
+  {
+    code: "OBSYDO_3M",
+    title: "OBSYDO VPN 3 месяца (-5%)",
+    description: "3 месяца, 300 GB/мес, скидка 5%, продление суммируется",
+    starsPrice: Math.round(monthPrice * 3 * 0.95),
+    durationDays: 90,
+    trafficLimitGb: appConfig.DEFAULT_TRAFFIC_GB
+  },
+  {
+    code: "OBSYDO_6M",
+    title: "OBSYDO VPN 6 месяцев (-10%)",
+    description: "6 месяцев, 300 GB/мес, скидка 10%, продление суммируется",
+    starsPrice: Math.round(monthPrice * 6 * 0.9),
+    durationDays: 180,
+    trafficLimitGb: appConfig.DEFAULT_TRAFFIC_GB
+  }
+];
+
+for (const p of plansSeed) {
   db.prepare(`
     INSERT INTO products (code, title, description, stars_price, duration_days, traffic_limit_gb, is_active)
     VALUES (?, ?, ?, ?, ?, ?, 1)
-  `).run(
-    basePlanCode,
-    "OBSYDO VPN 30 дней",
-    "Основной тариф OBSYDO VPN: 30 дней, 300 GB, продление суммируется",
-    appConfig.DEFAULT_PLAN_PRICE_STARS,
-    appConfig.DEFAULT_PLAN_DURATION_DAYS,
-    appConfig.DEFAULT_TRAFFIC_GB
-  );
-} else {
-  db.prepare(`
-    UPDATE products
-    SET title = ?, description = ?, stars_price = ?, duration_days = ?, traffic_limit_gb = ?, is_active = 1
-    WHERE code = ?
-  `).run(
-    "OBSYDO VPN 30 дней",
-    "Основной тариф OBSYDO VPN: 30 дней, 300 GB, продление суммируется",
-    appConfig.DEFAULT_PLAN_PRICE_STARS,
-    appConfig.DEFAULT_PLAN_DURATION_DAYS,
-    appConfig.DEFAULT_TRAFFIC_GB,
-    basePlanCode
-  );
+    ON CONFLICT(code) DO UPDATE SET
+      title = excluded.title,
+      description = excluded.description,
+      stars_price = excluded.stars_price,
+      duration_days = excluded.duration_days,
+      traffic_limit_gb = excluded.traffic_limit_gb,
+      is_active = 1
+  `).run(p.code, p.title, p.description, p.starsPrice, p.durationDays, p.trafficLimitGb);
 }
-db.prepare("UPDATE products SET is_active = 0 WHERE code <> ?").run(basePlanCode);
 
 function mapProduct(row: any): Product {
   return {
@@ -153,6 +182,9 @@ function mapOrder(row: any): Order {
 }
 
 export const repo = {
+  addDaysIso(fromIso: string, days: number): string {
+    return new Date(new Date(fromIso).getTime() + days * 24 * 60 * 60 * 1000).toISOString();
+  },
   getActiveProducts(): Product[] {
     const rows = db.prepare("SELECT * FROM products WHERE is_active = 1 ORDER BY stars_price ASC").all();
     return rows.map(mapProduct);
@@ -406,11 +438,119 @@ export const repo = {
       .get(telegramUserId);
     return row ? mapOrder(row) : null;
   },
+  getPaidOrdersForUser(telegramUserId: number): Order[] {
+    const rows = db
+      .prepare("SELECT * FROM orders WHERE telegram_user_id = ? AND status = 'PAID' ORDER BY id DESC")
+      .all(telegramUserId);
+    return rows.map(mapOrder);
+  },
   hasUsedTrial(telegramUserId: number): boolean {
     const row = db.prepare("SELECT 1 as ok FROM trials WHERE telegram_user_id = ?").get(telegramUserId) as
       | { ok: number }
       | undefined;
     return Boolean(row?.ok);
+  },
+  getTrialByTelegramId(telegramUserId: number): Trial | null {
+    const row = db
+      .prepare("SELECT telegram_user_id, remnawave_user_uuid, expires_at, created_at FROM trials WHERE telegram_user_id = ?")
+      .get(telegramUserId) as
+      | {
+          telegram_user_id: number;
+          remnawave_user_uuid: string;
+          expires_at: string;
+          created_at: string;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      telegramUserId: row.telegram_user_id,
+      remnawaveUserUuid: row.remnawave_user_uuid,
+      expiresAt: row.expires_at,
+      createdAt: row.created_at
+    };
+  },
+  deleteTrialByTelegramId(telegramUserId: number): void {
+    db.prepare("DELETE FROM trials WHERE telegram_user_id = ?").run(telegramUserId);
+  },
+  upsertTrafficCycleOnPayment(input: {
+    telegramUserId: number;
+    remnawaveUserUuid: string;
+    resetAnchor: boolean;
+  }): void {
+    const nowIso = new Date().toISOString();
+    const current = db
+      .prepare(
+        "SELECT telegram_user_id, remnawave_user_uuid, anchor_at, next_reset_at FROM traffic_cycles WHERE telegram_user_id = ?"
+      )
+      .get(input.telegramUserId) as
+      | {
+          telegram_user_id: number;
+          remnawave_user_uuid: string;
+          anchor_at: string;
+          next_reset_at: string;
+        }
+      | undefined;
+    if (!current) {
+      db.prepare(`
+        INSERT INTO traffic_cycles (telegram_user_id, remnawave_user_uuid, anchor_at, next_reset_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(input.telegramUserId, input.remnawaveUserUuid, nowIso, this.addDaysIso(nowIso, 30), nowIso);
+      return;
+    }
+    if (input.resetAnchor) {
+      db.prepare(`
+        UPDATE traffic_cycles
+        SET remnawave_user_uuid = ?,
+            anchor_at = ?,
+            next_reset_at = ?,
+            updated_at = ?
+        WHERE telegram_user_id = ?
+      `).run(input.remnawaveUserUuid, nowIso, this.addDaysIso(nowIso, 30), nowIso, input.telegramUserId);
+      return;
+    }
+    db.prepare(`
+      UPDATE traffic_cycles
+      SET remnawave_user_uuid = ?, updated_at = ?
+      WHERE telegram_user_id = ?
+    `).run(input.remnawaveUserUuid, nowIso, input.telegramUserId);
+  },
+  getDueTrafficCycles(nowIso: string, limit = 200): Array<{
+    telegramUserId: number;
+    remnawaveUserUuid: string;
+    anchorAt: string;
+    nextResetAt: string;
+  }> {
+    const rows = db
+      .prepare(
+        `SELECT telegram_user_id, remnawave_user_uuid, anchor_at, next_reset_at
+         FROM traffic_cycles
+         WHERE next_reset_at <= ?
+         ORDER BY next_reset_at ASC
+         LIMIT ?`
+      )
+      .all(nowIso, limit) as Array<{
+      telegram_user_id: number;
+      remnawave_user_uuid: string;
+      anchor_at: string;
+      next_reset_at: string;
+    }>;
+    return rows.map((r) => ({
+      telegramUserId: r.telegram_user_id,
+      remnawaveUserUuid: r.remnawave_user_uuid,
+      anchorAt: r.anchor_at,
+      nextResetAt: r.next_reset_at
+    }));
+  },
+  markTrafficCycleReset(input: { telegramUserId: number; nextResetAt: string }): void {
+    const nowIso = new Date().toISOString();
+    db.prepare(`
+      UPDATE traffic_cycles
+      SET next_reset_at = ?, last_reset_at = ?, updated_at = ?
+      WHERE telegram_user_id = ?
+    `).run(input.nextResetAt, nowIso, nowIso, input.telegramUserId);
+  },
+  deleteTrafficCycleByTelegramId(telegramUserId: number): void {
+    db.prepare("DELETE FROM traffic_cycles WHERE telegram_user_id = ?").run(telegramUserId);
   },
   saveTrial(input: { telegramUserId: number; remnawaveUserUuid: string; expiresAt: string }): void {
     db.prepare(`

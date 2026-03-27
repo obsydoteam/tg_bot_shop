@@ -33,6 +33,13 @@ export type Order = {
 
 export type ReminderType = "H24" | "H1";
 
+export type Trial = {
+  telegramUserId: number;
+  remnawaveUserUuid: string;
+  expiresAt: string;
+  createdAt: string;
+};
+
 export type RemnawaveUser = {
   uuid: string;
   shortUuid: string;

@@ -8,7 +8,7 @@ const rw = new RemnawaveClient();
 const bot = new Telegraf(appConfig.BOT_TOKEN);
 const INVOICE_TTL_MINUTES = 10;
 
-type AdminDangerAction = "ENABLE" | "DISABLE" | "RESET" | "REVOKE" | "DELETE";
+type AdminDangerAction = "ENABLE" | "DISABLE" | "RESET" | "REVOKE" | "DELETE" | "RESET_TRIAL";
 type PendingAdminAction = {
   adminId: number;
   targetTelegramId: number;
@@ -95,6 +95,12 @@ function getUtcRangeForMoscowDay(dayOffset = 0): { startIso: string; endIso: str
   return { startIso, endIso, label };
 }
 
+function hasActivePaidSubscription(telegramUserId: number): boolean {
+  const latest = repo.getLatestPaidOrderForUser(telegramUserId);
+  if (!latest?.expiresAt) return false;
+  return new Date(latest.expiresAt).getTime() > Date.now();
+}
+
 async function safeDelete(chatId: number, messageId: number) {
   try {
     await bot.telegram.deleteMessage(chatId, messageId);
@@ -137,6 +143,7 @@ function adminCommandsHelpText(): string {
     "/reset <telegramId> - сбросить трафик (с подтверждением)\n" +
     "/revoke <telegramId> - отозвать подписку (с подтверждением)\n" +
     "/delete <telegramId> - удалить пользователя (с подтверждением)\n" +
+    "/resettrial <telegramId> - обнулить trial: удалить trial-запись и trial-пользователя в RW (с подтверждением)\n" +
     "/broadcast <текст> - рассылка платным пользователям\n" +
     "/reconcile - ручная сверка с Remnawave\n" +
     "/dailyreport - ручная отправка ежедневной сводки"
@@ -179,6 +186,35 @@ async function requestDangerActionConfirm(
   targetTelegramId: number
 ): Promise<void> {
   if (!ctx.from || !isAdmin(ctx)) return;
+  if (action === "RESET_TRIAL") {
+    const trial = repo.getTrialByTelegramId(targetTelegramId);
+    if (!trial) {
+      await ctx.reply("Активный/зафиксированный trial для этого telegramId не найден в БД.");
+      return;
+    }
+    const id = compactId();
+    pendingAdminActions.set(id, {
+      adminId: ctx.from.id,
+      targetTelegramId,
+      targetUuid: trial.remnawaveUserUuid,
+      action,
+      createdAt: Date.now()
+    });
+    await ctx.reply(
+      `Подтвердите действие:\n` +
+        `- action: RESET_TRIAL\n` +
+        `- telegramId: ${targetTelegramId}\n` +
+        `- trial uuid: ${trial.remnawaveUserUuid}\n\n` +
+        "Будет удален trial-пользователь в Remnawave и запись в таблице trials. Выполнить?",
+      Markup.inlineKeyboard([
+        [
+          Markup.button.callback("Да", `admin:confirm:${id}:yes`),
+          Markup.button.callback("Нет", `admin:confirm:${id}:no`)
+        ]
+      ])
+    );
+    return;
+  }
   const rwUser = await rw.getByTelegramId(targetTelegramId);
   if (!rwUser) {
     await ctx.reply("Пользователь не найден в Remnawave.");
@@ -338,13 +374,48 @@ function mainPanelKeyboard() {
 
 async function renderProfilePanel(ctx: Context) {
   if (!ctx.from) return;
-  const latest = repo.getLatestPaidOrderForUser(ctx.from.id);
-  const text = latest
-    ? `Мой профиль\n\n` +
-      `Статус: активен\n` +
-      `Действует до: ${toMoscow(latest.expiresAt)} (МСК)\n` +
-      `Ссылка подписки:\n${latest.subscriptionUrl ?? "n/a"}`
-    : "Мой профиль\n\nУ вас пока нет активной подписки.";
+  const now = Date.now();
+  const paidOrders = repo.getPaidOrdersForUser(ctx.from.id);
+  const activePaid = paidOrders.filter((o) => !!o.expiresAt && new Date(o.expiresAt).getTime() > now);
+  const uniquePaidKeys = new Map<string, { expiresAt: string | null }>();
+  for (const o of activePaid) {
+    if (!o.subscriptionUrl) continue;
+    const prev = uniquePaidKeys.get(o.subscriptionUrl);
+    const prevTs = prev?.expiresAt ? new Date(prev.expiresAt).getTime() : 0;
+    const curTs = o.expiresAt ? new Date(o.expiresAt).getTime() : 0;
+    if (!prev || curTs > prevTs) {
+      uniquePaidKeys.set(o.subscriptionUrl, { expiresAt: o.expiresAt });
+    }
+  }
+
+  const trial = repo.getTrialByTelegramId(ctx.from.id);
+  let trialLine = "";
+  if (trial && new Date(trial.expiresAt).getTime() > now) {
+    try {
+      const trialUser = await rw.getByUuid(trial.remnawaveUserUuid);
+      if (trialUser?.subscriptionUrl) {
+        trialLine =
+          `\nTRIAL (до ${toMoscow(trial.expiresAt)}):\n` +
+          `${trialUser.subscriptionUrl}`;
+      } else {
+        trialLine = `\nTRIAL (до ${toMoscow(trial.expiresAt)}):\nключ временно недоступен`;
+      }
+    } catch {
+      trialLine = `\nTRIAL (до ${toMoscow(trial.expiresAt)}):\nключ временно недоступен`;
+    }
+  }
+
+  const paidBlock = Array.from(uniquePaidKeys.entries()).length
+    ? Array.from(uniquePaidKeys.entries())
+        .map(([url, meta], idx) => `Основной #${idx + 1} (до ${toMoscow(meta.expiresAt)}):\n${url}`)
+        .join("\n\n")
+    : "Нет активных платных ключей";
+
+  const text =
+    `Мой профиль\n\n` +
+    `Активные ключи:\n` +
+    `${paidBlock}` +
+    `${trialLine}`;
   await upsertPanel(
     ctx,
     text,
@@ -425,7 +496,7 @@ bot.command("help", async (ctx) => {
       "/trial - пробный период (1 раз)\n" +
       "/mysub - моя подписка\n" +
       "/admin - админка (только админ)\n" +
-      "/stats, /orders, /finduser, /grantdays, /revoke, /broadcast - админ-команды"
+      "/stats, /orders, /finduser, /grantdays, /revoke, /broadcast, /resettrial - админ-команды"
   );
 });
 
@@ -639,6 +710,7 @@ bot.on("message", async (ctx, next) => {
   }
 
   try {
+    const hadActivePaidBeforePayment = hasActivePaidSubscription(ctx.from.id);
     const trafficBytes = product.trafficLimitGb === 0 ? 0 : product.trafficLimitGb * 1024 * 1024 * 1024;
     let rwUser: Awaited<ReturnType<typeof rw.provisionOrExtend>> | null = null;
     let lastError: unknown = null;
@@ -672,6 +744,11 @@ bot.on("message", async (ctx, next) => {
       await transientReply(ctx, "Платеж уже был обработан ранее.");
       return;
     }
+    repo.upsertTrafficCycleOnPayment({
+      telegramUserId: ctx.from.id,
+      remnawaveUserUuid: rwUser.uuid,
+      resetAnchor: !hadActivePaidBeforePayment
+    });
 
     await upsertPanel(
       ctx,
@@ -1004,11 +1081,13 @@ bot.command("finduser", async (ctx) => {
   }
   const latest = repo.getLatestPaidOrderForUser(tgId);
   const rwUser = await rw.getByTelegramId(tgId);
+  const trial = repo.getTrialByTelegramId(tgId);
   await ctx.reply(
     `Пользователь ${tgId}\n` +
       `- RW UUID: ${rwUser?.uuid ?? "-"}\n` +
       `- До: ${toMoscow(rwUser?.expireAt ?? latest?.expiresAt ?? null)}\n` +
-      `- Последний заказ: ${latest ? `#${latest.id} ${latest.status} ${latest.amountStars}⭐` : "нет"}`,
+      `- Последний заказ: ${latest ? `#${latest.id} ${latest.status} ${latest.amountStars}⭐` : "нет"}\n` +
+      `- Trial в БД: ${trial ? "да" : "нет"}`,
     Markup.inlineKeyboard([
       [
         Markup.button.callback("Enable", `admin:user:${tgId}:ENABLE`),
@@ -1019,6 +1098,7 @@ bot.command("finduser", async (ctx) => {
         Markup.button.callback("Revoke", `admin:user:${tgId}:REVOKE`)
       ],
       [Markup.button.callback("Delete", `admin:user:${tgId}:DELETE`)],
+      [Markup.button.callback("Reset trial", `admin:user:${tgId}:RESETTRIAL`)],
       [Markup.button.callback("+30 дней", `admin:user:${tgId}:GRANT30`)],
       [Markup.button.callback("Админка", "admin:home")]
     ])
@@ -1041,11 +1121,13 @@ bot.on("text", async (ctx, next) => {
     }
     const latest = repo.getLatestPaidOrderForUser(tgId);
     const rwUser = await rw.getByTelegramId(tgId);
+    const trial = repo.getTrialByTelegramId(tgId);
     await ctx.reply(
       `Пользователь ${tgId}\n` +
         `- RW UUID: ${rwUser?.uuid ?? "-"}\n` +
         `- До: ${toMoscow(rwUser?.expireAt ?? latest?.expiresAt ?? null)}\n` +
-        `- Последний заказ: ${latest ? `#${latest.id} ${latest.status} ${latest.amountStars}⭐` : "нет"}`,
+        `- Последний заказ: ${latest ? `#${latest.id} ${latest.status} ${latest.amountStars}⭐` : "нет"}\n` +
+        `- Trial в БД: ${trial ? "да" : "нет"}`,
       Markup.inlineKeyboard([
         [
           Markup.button.callback("Enable", `admin:user:${tgId}:ENABLE`),
@@ -1056,6 +1138,7 @@ bot.on("text", async (ctx, next) => {
           Markup.button.callback("Revoke", `admin:user:${tgId}:REVOKE`)
         ],
         [Markup.button.callback("Delete", `admin:user:${tgId}:DELETE`)],
+        [Markup.button.callback("Reset trial", `admin:user:${tgId}:RESETTRIAL`)],
         [Markup.button.callback("+30 дней", `admin:user:${tgId}:GRANT30`)],
         [Markup.button.callback("Админка", "admin:home")]
       ])
@@ -1149,6 +1232,16 @@ bot.command("delete", async (ctx) => {
   await requestDangerActionConfirm(ctx, "DELETE", tgId);
 });
 
+bot.command("resettrial", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const tgId = Number(ctx.message.text.split(" ")[1]);
+  if (!Number.isFinite(tgId)) {
+    await ctx.reply("Формат: /resettrial <telegramId>");
+    return;
+  }
+  await requestDangerActionConfirm(ctx, "RESET_TRIAL", tgId);
+});
+
 bot.command("broadcast", async (ctx) => {
   if (!isAdmin(ctx)) return;
   const text = ctx.message.text.split(" ").slice(1).join(" ").trim();
@@ -1189,7 +1282,7 @@ bot.command("dailyreport", async (ctx) => {
   await ctx.reply("Сводка отправлена.");
 });
 
-bot.action(/^admin:user:(\d+):(ENABLE|DISABLE|RESET|REVOKE|DELETE|GRANT30)$/, async (ctx) => {
+bot.action(/^admin:user:(\d+):(ENABLE|DISABLE|RESET|REVOKE|DELETE|GRANT30|RESETTRIAL)$/, async (ctx) => {
   if (!isAdmin(ctx)) return;
   await ctx.answerCbQuery();
   const tgId = Number(ctx.match[1]);
@@ -1206,6 +1299,10 @@ bot.action(/^admin:user:(\d+):(ENABLE|DISABLE|RESET|REVOKE|DELETE|GRANT30)$/, as
     }
     const updated = await rw.extendExistingUser(rwUser, 30, appConfig.defaultTrafficBytes);
     await ctx.reply(`Продлено на 30 дней. Новый срок: ${toMoscow(updated.expireAt)} (МСК)`);
+    return;
+  }
+  if (action === "RESETTRIAL") {
+    await requestDangerActionConfirm(ctx, "RESET_TRIAL", tgId);
     return;
   }
   await requestDangerActionConfirm(ctx, action as AdminDangerAction, tgId);
@@ -1247,6 +1344,16 @@ bot.action(/^admin:confirm:([a-z0-9]+):(yes|no)$/, async (ctx) => {
       await rw.revokeSubscription(pending.targetUuid);
     } else if (pending.action === "DELETE") {
       await rw.deleteUser(pending.targetUuid);
+      repo.deleteTrialByTelegramId(pending.targetTelegramId);
+      repo.deleteTrafficCycleByTelegramId(pending.targetTelegramId);
+    } else if (pending.action === "RESET_TRIAL") {
+      try {
+        await rw.deleteUser(pending.targetUuid);
+      } catch (error: any) {
+        // If trial user was already removed in RW, still clear local trial lock.
+        if (Number(error?.response?.status) !== 404) throw error;
+      }
+      repo.deleteTrialByTelegramId(pending.targetTelegramId);
     }
     await ctx.reply(`Выполнено: ${pending.action} для telegramId ${pending.targetTelegramId}.`);
   } catch (error: any) {
@@ -1263,10 +1370,44 @@ bot.action(/^admin:confirm:([a-z0-9]+):(yes|no)$/, async (ctx) => {
 export async function launchBot() {
   await bot.launch();
   startPendingInvoiceCleanupLoop();
+  startTrafficCycleResetLoop();
   startExpiryReminderLoop();
   startReconciliationLoop();
   startDailySummaryLoop();
   console.log("Bot launched");
+}
+
+function startTrafficCycleResetLoop() {
+  const run = async () => {
+    const nowIso = new Date().toISOString();
+    const due = repo.getDueTrafficCycles(nowIso, 300);
+    for (const cycle of due) {
+      // Do not burn reset calls for expired users.
+      if (!hasActivePaidSubscription(cycle.telegramUserId)) continue;
+      let nextResetAt = cycle.nextResetAt;
+      while (new Date(nextResetAt).getTime() <= Date.now()) {
+        nextResetAt = repo.addDaysIso(nextResetAt, 30);
+      }
+      try {
+        await rw.resetTraffic(cycle.remnawaveUserUuid);
+        repo.markTrafficCycleReset({
+          telegramUserId: cycle.telegramUserId,
+          nextResetAt
+        });
+      } catch (error: any) {
+        await notifyAdmins(
+          `traffic reset failed: tg=${cycle.telegramUserId}, uuid=${cycle.remnawaveUserUuid}, err=${
+            error?.response?.data ? JSON.stringify(error.response.data) : error?.message ?? "unknown"
+          }`
+        );
+      }
+    }
+  };
+
+  void run();
+  setInterval(() => {
+    void run();
+  }, 5 * 60 * 1000);
 }
 
 function startPendingInvoiceCleanupLoop() {
