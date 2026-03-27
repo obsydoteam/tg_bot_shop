@@ -9,7 +9,7 @@
 - Продажа тарифов в Telegram через инвойсы `XTR`.
 - Автоматическая выдача доступа в Remnawave после оплаты.
 - Продление подписки для существующих пользователей.
-- Пробный период 1 час (одноразово).
+- Пробный период 1 час и 1 GB (одноразово).
 - Напоминания об окончании подписки за 24 часа и за 1 час.
 - Reconciliation (сверка локальных данных и Remnawave).
 - Ежедневная сводка админу в 23:00 МСК.
@@ -196,6 +196,11 @@ docker compose ps
 - `ADMIN_TELEGRAM_IDS`
 - `DATABASE_PATH`
 - `DATABASE_PATH=/app/data/shop.db`
+- `DEFAULT_PLAN_PRICE_STARS=200`
+- `DEFAULT_PLAN_DURATION_DAYS=30`
+- `DEFAULT_TRAFFIC_GB=300`
+- `TRIAL_DURATION_HOURS=1`
+- `TRIAL_TRAFFIC_GB=1`
 - `TIMEZONE=Europe/Moscow`
 - `RECONCILE_INTERVAL_MINUTES`
 - `RECONCILE_LIMIT`

@@ -156,7 +156,7 @@ export class RemnawaveClient {
       username: input.username,
       telegramId: input.telegramId,
       expireAt,
-      trafficLimitBytes: appConfig.defaultTrafficBytes,
+      trafficLimitBytes: appConfig.trialTrafficBytes,
       hwidDeviceLimit: appConfig.DEFAULT_HARDWARE_LIMIT,
       trafficLimitStrategy: "MONTH",
       tag: "TRIAL",

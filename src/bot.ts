@@ -6,6 +6,7 @@ import { RemnawaveClient } from "./remnawave.js";
 
 const rw = new RemnawaveClient();
 const bot = new Telegraf(appConfig.BOT_TOKEN);
+const INVOICE_TTL_MINUTES = 10;
 
 type AdminDangerAction = "ENABLE" | "DISABLE" | "RESET" | "REVOKE" | "DELETE";
 type PendingAdminAction = {
@@ -325,20 +326,59 @@ async function sendDailySummary(reportDateLabel: string, dayStartIso: string, da
 }
 
 function mainPanelText() {
-  return (
-    `Добро пожаловать в ${appConfig.SHOP_NAME}\n\n` +
-    "Оплата: Telegram Stars (XTR)\n" +
-    "Диалог в режиме чистого интерфейса: основные экраны обновляются без лишней истории."
-  );
+  return `Добро пожаловать в ${appConfig.SHOP_NAME}\n\nВыберите нужный раздел:`;
 }
 
 function mainPanelKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback("Купить VPN", "shop:list")],
-    [Markup.button.callback("Пробный период 1 час", "trial:start")],
-    [Markup.button.callback("Моя подписка", "sub:my")],
-    [Markup.button.url("Поддержка", appConfig.SUPPORT_LINK)]
+    [Markup.button.callback("Тарифы", "shop:list"), Markup.button.callback("Мой профиль", "sub:my")],
+    [Markup.button.callback("Пробный период", "trial:start"), Markup.button.callback("Помощь", "panel:help")]
   ]);
+}
+
+async function renderProfilePanel(ctx: Context) {
+  if (!ctx.from) return;
+  const latest = repo.getLatestPaidOrderForUser(ctx.from.id);
+  const text = latest
+    ? `Мой профиль\n\n` +
+      `Статус: активен\n` +
+      `Действует до: ${toMoscow(latest.expiresAt)} (МСК)\n` +
+      `Ссылка подписки:\n${latest.subscriptionUrl ?? "n/a"}`
+    : "Мой профиль\n\nУ вас пока нет активной подписки.";
+  await upsertPanel(
+    ctx,
+    text,
+    Markup.inlineKeyboard([
+      [Markup.button.callback("Продлить", "shop:list")],
+      [Markup.button.callback("Назад", "panel:home")]
+    ])
+  );
+}
+
+async function renderPlansPanel(ctx: Context) {
+  const products = repo.getActiveProducts();
+  if (!products.length) {
+    await upsertPanel(
+      ctx,
+      "Сейчас нет доступных тарифов.",
+      Markup.inlineKeyboard([[Markup.button.callback("Назад", "panel:home")]])
+    );
+    return;
+  }
+  const buttons = products.map((p) => [Markup.button.callback(`${p.title} - ${p.starsPrice} ⭐`, `shop:buy:${p.id}`)]);
+  buttons.push([Markup.button.callback("Назад", "panel:home")]);
+  await upsertPanel(ctx, "Выберите тариф:", Markup.inlineKeyboard(buttons));
+}
+
+async function renderHelpPanel(ctx: Context) {
+  await upsertPanel(
+    ctx,
+    "Помощь\n\nЕсли возникли вопросы по оплате или подключению, напишите в поддержку.",
+    Markup.inlineKeyboard([
+      [Markup.button.url("Поддержка", appConfig.SUPPORT_LINK)],
+      [Markup.button.callback("Назад", "panel:home")]
+    ])
+  );
 }
 
 async function upsertPanel(ctx: Context, text: string, keyboard: ReturnType<typeof Markup.inlineKeyboard>) {
@@ -390,14 +430,7 @@ bot.command("help", async (ctx) => {
 });
 
 bot.command("plans", async (ctx) => {
-  const products = repo.getActiveProducts();
-  if (!products.length) {
-    await transientReply(ctx, "Сейчас нет активных тарифов.");
-    return;
-  }
-  const buttons = products.map((p) => [Markup.button.callback(`${p.title} - ${p.starsPrice} ⭐`, `shop:buy:${p.id}`)]);
-  buttons.push([Markup.button.callback("Назад", "panel:home")]);
-  await upsertPanel(ctx, "Выберите тариф:", Markup.inlineKeyboard(buttons));
+  await renderPlansPanel(ctx);
 });
 
 bot.command("trial", async (ctx) => {
@@ -424,7 +457,7 @@ bot.command("trial", async (ctx) => {
     });
     await upsertPanel(
       ctx,
-      `Пробный период активирован на ${appConfig.TRIAL_DURATION_HOURS} час.\n` +
+      `Пробный период активирован: ${appConfig.TRIAL_DURATION_HOURS} час, ${appConfig.TRIAL_TRAFFIC_GB} GB.\n` +
         `Доступ до: ${toMoscow(rwUser.expireAt)} (МСК)\n` +
         `Ссылка подписки:\n${rwUser.subscriptionUrl}`,
       Markup.inlineKeyboard([[Markup.button.callback("Главное меню", "panel:home")]])
@@ -436,44 +469,17 @@ bot.command("trial", async (ctx) => {
 });
 
 bot.command("mysub", async (ctx) => {
-  if (!ctx.from) return;
-  const latest = repo.getLatestPaidOrderForUser(ctx.from.id);
-  if (!latest) {
-    await upsertPanel(ctx, "Пока нет активных покупок. Нажмите «Купить VPN».", mainPanelKeyboard());
-    return;
-  }
-  await upsertPanel(
-    ctx,
-    `Ваш доступ:\n` +
-      `- Статус заказа: ${latest.status}\n` +
-      `- До: ${toMoscow(latest.expiresAt)} (МСК)\n` +
-      `- Ссылка подписки: ${latest.subscriptionUrl ?? "n/a"}`,
-    Markup.inlineKeyboard([
-      [Markup.button.callback("Продлить", "shop:list")],
-      [Markup.button.callback("Главное меню", "panel:home")]
-    ])
-  );
+  await renderProfilePanel(ctx);
 });
 
 bot.action("sub:my", async (ctx) => {
   await ctx.answerCbQuery();
-  if (!ctx.from) return;
-  const latest = repo.getLatestPaidOrderForUser(ctx.from.id);
-  if (!latest) {
-    await upsertPanel(ctx, "Пока нет активных покупок. Нажмите «Купить VPN».", mainPanelKeyboard());
-    return;
-  }
-  await upsertPanel(
-    ctx,
-    `Ваш доступ:\n` +
-      `- Статус заказа: ${latest.status}\n` +
-      `- До: ${toMoscow(latest.expiresAt)} (МСК)\n` +
-      `- Ссылка подписки: ${latest.subscriptionUrl ?? "n/a"}`,
-    Markup.inlineKeyboard([
-      [Markup.button.callback("Продлить", "shop:list")],
-      [Markup.button.callback("Главное меню", "panel:home")]
-    ])
-  );
+  await renderProfilePanel(ctx);
+});
+
+bot.action("panel:help", async (ctx) => {
+  await ctx.answerCbQuery();
+  await renderHelpPanel(ctx);
 });
 
 bot.action("panel:home", async (ctx) => {
@@ -482,15 +488,8 @@ bot.action("panel:home", async (ctx) => {
 });
 
 bot.action("shop:list", async (ctx) => {
-  const products = repo.getActiveProducts();
-  if (!products.length) {
-    await ctx.answerCbQuery("Нет активных тарифов");
-    return;
-  }
-  const buttons = products.map((p) => [Markup.button.callback(`${p.title} - ${p.starsPrice} ⭐`, `shop:buy:${p.id}`)]);
-  buttons.push([Markup.button.callback("Назад", "panel:home")]);
-  await upsertPanel(ctx, "Выберите тариф:", Markup.inlineKeyboard(buttons));
   await ctx.answerCbQuery();
+  await renderPlansPanel(ctx);
 });
 
 bot.action("trial:start", async (ctx) => {
@@ -518,7 +517,7 @@ bot.action("trial:start", async (ctx) => {
     });
     await upsertPanel(
       ctx,
-      `Пробный период активирован на ${appConfig.TRIAL_DURATION_HOURS} час.\n` +
+      `Пробный период активирован: ${appConfig.TRIAL_DURATION_HOURS} час, ${appConfig.TRIAL_TRAFFIC_GB} GB.\n` +
         `Доступ до: ${toMoscow(rwUser.expireAt)} (МСК)\n` +
         `Ссылка подписки:\n${rwUser.subscriptionUrl}`,
       Markup.inlineKeyboard([[Markup.button.callback("Главное меню", "panel:home")]])
@@ -545,7 +544,7 @@ bot.action(/^shop:buy:(\d+)$/, async (ctx) => {
     amountStars: product.starsPrice,
     payload
   });
-  await ctx.replyWithInvoice({
+  const invoiceMessage = await ctx.replyWithInvoice({
     title: `${appConfig.SHOP_NAME} - ${product.title}`,
     description: `${product.description}\nСрок: ${product.durationDays} дней\nТрафик: ${formatTraffic(product.trafficLimitGb)}`,
     payload,
@@ -553,8 +552,18 @@ bot.action(/^shop:buy:(\d+)$/, async (ctx) => {
     currency: "XTR",
     prices: [{ label: product.title, amount: product.starsPrice }]
   });
+  repo.setInvoiceMeta({
+    payload,
+    invoiceChatId: ctx.chat!.id,
+    invoiceMessageId: invoiceMessage.message_id,
+    invoiceExpiresAt: new Date(Date.now() + INVOICE_TTL_MINUTES * 60 * 1000).toISOString()
+  });
   await ctx.answerCbQuery();
-  await transientReply(ctx, "Инвойс отправлен. После оплаты доступ выдастся автоматически.", 10);
+  await upsertPanel(
+    ctx,
+    `Счет выставлен на ${INVOICE_TTL_MINUTES} минут.\nПосле оплаты доступ активируется автоматически.`,
+    Markup.inlineKeyboard([[Markup.button.callback("Назад", "panel:home")]])
+  );
 });
 
 bot.on("pre_checkout_query", async (ctx) => {
@@ -568,6 +577,14 @@ bot.on("pre_checkout_query", async (ctx) => {
   if (order.status !== "PENDING") {
     await notifyAdmins(`pre_checkout: invalid status=${order.status}, payload=${payload}, from=${ctx.from?.id ?? "unknown"}`);
     await ctx.answerPreCheckoutQuery(false, "Заказ уже обработан");
+    return;
+  }
+  if (order.invoiceExpiresAt && new Date(order.invoiceExpiresAt).getTime() < Date.now()) {
+    repo.deletePendingOrderById(order.id);
+    if (order.invoiceChatId && order.invoiceMessageId) {
+      await safeDelete(order.invoiceChatId, order.invoiceMessageId);
+    }
+    await ctx.answerPreCheckoutQuery(false, "Счет истек. Создайте новый.");
     return;
   }
   if (ctx.preCheckoutQuery.currency !== "XTR") {
@@ -661,11 +678,10 @@ bot.on("message", async (ctx, next) => {
       "Оплата прошла успешно.\n\n" +
         `Тариф: ${product.title}\n` +
         `Действует до: ${toMoscow(rwUser.expireAt)} (МСК)\n` +
-        `Ссылка подписки:\n${rwUser.subscriptionUrl}\n\n` +
-        "Сохраните эту ссылку и импортируйте ее в ваш клиент.",
+        `Ссылка подписки:\n${rwUser.subscriptionUrl}`,
       Markup.inlineKeyboard([
-        [Markup.button.callback("Главное меню", "panel:home")],
-        [Markup.button.callback("Продлить", "shop:list")]
+        [Markup.button.callback("Мой профиль", "sub:my")],
+        [Markup.button.callback("Главное меню", "panel:home")]
       ])
     );
   } catch (error: any) {
@@ -1246,10 +1262,28 @@ bot.action(/^admin:confirm:([a-z0-9]+):(yes|no)$/, async (ctx) => {
 
 export async function launchBot() {
   await bot.launch();
+  startPendingInvoiceCleanupLoop();
   startExpiryReminderLoop();
   startReconciliationLoop();
   startDailySummaryLoop();
   console.log("Bot launched");
+}
+
+function startPendingInvoiceCleanupLoop() {
+  const cleanup = async () => {
+    const expired = repo.getExpiredPendingOrders(new Date().toISOString());
+    for (const order of expired) {
+      if (order.invoiceChatId && order.invoiceMessageId) {
+        await safeDelete(order.invoiceChatId, order.invoiceMessageId);
+      }
+      repo.deletePendingOrderById(order.id);
+    }
+  };
+
+  void cleanup();
+  setInterval(() => {
+    void cleanup();
+  }, 60 * 1000);
 }
 
 function startExpiryReminderLoop() {

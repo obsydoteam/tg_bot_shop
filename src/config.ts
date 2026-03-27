@@ -18,6 +18,7 @@ const schema = z.object({
   DEFAULT_PLAN_PRICE_STARS: z.coerce.number().int().positive().default(200),
   DEFAULT_PLAN_DURATION_DAYS: z.coerce.number().int().positive().default(30),
   TRIAL_DURATION_HOURS: z.coerce.number().int().positive().default(1),
+  TRIAL_TRAFFIC_GB: z.coerce.number().int().positive().default(1),
   TIMEZONE: z.string().default("Europe/Moscow"),
   RECONCILE_INTERVAL_MINUTES: z.coerce.number().int().positive().default(30),
   RECONCILE_LIMIT: z.coerce.number().int().positive().default(2000),
@@ -40,5 +41,6 @@ export const appConfig = {
     .filter(Boolean)
     .map((v) => Number(v))
     .filter((v) => Number.isFinite(v)),
-  defaultTrafficBytes: data.DEFAULT_TRAFFIC_GB * 1024 * 1024 * 1024
+  defaultTrafficBytes: data.DEFAULT_TRAFFIC_GB * 1024 * 1024 * 1024,
+  trialTrafficBytes: data.TRIAL_TRAFFIC_GB * 1024 * 1024 * 1024
 };

@@ -24,6 +24,9 @@ export type Order = {
   subscriptionUrl: string | null;
   expiresAt: string | null;
   paymentChargeId: string | null;
+  invoiceChatId: number | null;
+  invoiceMessageId: number | null;
+  invoiceExpiresAt: string | null;
   createdAt: string;
   updatedAt: string;
 };

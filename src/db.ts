@@ -75,6 +75,18 @@ CREATE INDEX IF NOT EXISTS idx_orders_rw_uuid ON orders(remnawave_user_uuid);
 CREATE INDEX IF NOT EXISTS idx_trials_created_at ON trials(created_at);
 `);
 
+const orderColumns = db.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>;
+const orderColumnNames = new Set(orderColumns.map((c) => c.name));
+if (!orderColumnNames.has("invoice_chat_id")) {
+  db.exec("ALTER TABLE orders ADD COLUMN invoice_chat_id INTEGER;");
+}
+if (!orderColumnNames.has("invoice_message_id")) {
+  db.exec("ALTER TABLE orders ADD COLUMN invoice_message_id INTEGER;");
+}
+if (!orderColumnNames.has("invoice_expires_at")) {
+  db.exec("ALTER TABLE orders ADD COLUMN invoice_expires_at TEXT;");
+}
+
 const basePlanCode = "OBSYDO_MONTH_200";
 const basePlan = db.prepare("SELECT id FROM products WHERE code = ?").get(basePlanCode) as { id: number } | undefined;
 if (!basePlan) {
@@ -132,6 +144,9 @@ function mapOrder(row: any): Order {
     subscriptionUrl: row.subscription_url,
     expiresAt: row.expires_at,
     paymentChargeId: row.payment_charge_id,
+    invoiceChatId: row.invoice_chat_id ?? null,
+    invoiceMessageId: row.invoice_message_id ?? null,
+    invoiceExpiresAt: row.invoice_expires_at ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -215,6 +230,44 @@ export const repo = {
     const row = db.prepare("SELECT * FROM orders WHERE payment_charge_id = ?").get(paymentChargeId);
     return row ? mapOrder(row) : null;
   },
+  setInvoiceMeta(input: {
+    payload: string;
+    invoiceChatId: number;
+    invoiceMessageId: number;
+    invoiceExpiresAt: string;
+  }): void {
+    db.prepare(`
+      UPDATE orders
+      SET invoice_chat_id = ?,
+          invoice_message_id = ?,
+          invoice_expires_at = ?,
+          updated_at = ?
+      WHERE payload = ? AND status = 'PENDING'
+    `).run(
+      input.invoiceChatId,
+      input.invoiceMessageId,
+      input.invoiceExpiresAt,
+      new Date().toISOString(),
+      input.payload
+    );
+  },
+  getExpiredPendingOrders(nowIso: string): Order[] {
+    const fallbackCreatedBeforeIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const rows = db
+      .prepare(
+        `SELECT * FROM orders
+         WHERE status = 'PENDING'
+           AND (
+             (invoice_expires_at IS NOT NULL AND invoice_expires_at <= ?)
+             OR (invoice_expires_at IS NULL AND created_at <= ?)
+           )`
+      )
+      .all(nowIso, fallbackCreatedBeforeIso);
+    return rows.map(mapOrder);
+  },
+  deletePendingOrderById(orderId: number): void {
+    db.prepare("DELETE FROM orders WHERE id = ? AND status = 'PENDING'").run(orderId);
+  },
   markOrderPaid(input: {
     payload: string;
     paymentChargeId: string;
@@ -233,7 +286,10 @@ export const repo = {
             remnawave_short_uuid = ?,
             subscription_url = ?,
             expires_at = ?,
-            updated_at = ?
+            updated_at = ?,
+            invoice_chat_id = NULL,
+            invoice_message_id = NULL,
+            invoice_expires_at = NULL
         WHERE payload = ? AND status = 'PENDING'
       `).run(
         input.paymentChargeId,
