@@ -129,7 +129,10 @@ function quickKeyboard(isAdminUser: boolean) {
 
 async function syncQuickKeyboard(ctx: Context) {
   if (!ctx.from || !ctx.chat) return;
-  await ctx.reply("⌨️ Быстрые кнопки обновлены.", quickKeyboard(isAdmin(ctx)));
+  const msg = await ctx.reply("⌨️", quickKeyboard(isAdmin(ctx)));
+  setTimeout(() => {
+    void safeDelete(ctx.chat!.id, msg.message_id);
+  }, 1200);
 }
 
 async function safeDelete(chatId: number, messageId: number) {
@@ -183,9 +186,8 @@ function adminCommandsHelpText(): string {
 
 function adminPanelKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback("Статистика", "admin:stats"), Markup.button.callback("Последние заказы", "admin:orders")],
-    [Markup.button.callback("Тарифы", "admin:products"), Markup.button.callback("Инструкции", "admin:help")],
-    [Markup.button.callback("Найти пользователя", "admin:user:lookup"), Markup.button.callback("Рассылка", "admin:broadcast:prompt")]
+    [Markup.button.callback("Последние заказы", "admin:orders"), Markup.button.callback("Тарифы", "admin:products")],
+    [Markup.button.callback("Инструкции", "admin:help")]
   ]);
 }
 
@@ -478,8 +480,7 @@ function mainPanelText() {
 
 function mainPanelKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback("Тарифы", "shop:list"), Markup.button.callback("Мой профиль", "sub:my")],
-    [Markup.button.callback("Пробный период", "trial:start"), Markup.button.callback("Помощь", "panel:help")]
+    [Markup.button.url("Поддержка", appConfig.SUPPORT_LINK)]
   ]);
 }
 
