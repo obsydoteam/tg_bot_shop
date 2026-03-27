@@ -362,7 +362,7 @@ async function sendDailySummary(reportDateLabel: string, dayStartIso: string, da
 }
 
 function mainPanelText() {
-  return `Добро пожаловать в ${appConfig.SHOP_NAME}\n\nВыберите нужный раздел:`;
+  return `┌ ${appConfig.SHOP_NAME}\n│\n│ Удобный и быстрый доступ к VPN\n└ Выберите раздел ниже`;
 }
 
 function mainPanelKeyboard() {
@@ -412,8 +412,8 @@ async function renderProfilePanel(ctx: Context) {
     : "Нет активных платных ключей";
 
   const text =
-    `Мой профиль\n\n` +
-    `Активные ключи:\n` +
+    `👤 Мой профиль\n\n` +
+    `🔑 Активные ключи\n` +
     `${paidBlock}` +
     `${trialLine}`;
   await upsertPanel(
@@ -431,20 +431,20 @@ async function renderPlansPanel(ctx: Context) {
   if (!products.length) {
     await upsertPanel(
       ctx,
-      "Сейчас нет доступных тарифов.",
+      "📦 Сейчас нет доступных тарифов.",
       Markup.inlineKeyboard([[Markup.button.callback("Назад", "panel:home")]])
     );
     return;
   }
   const buttons = products.map((p) => [Markup.button.callback(`${p.title} - ${p.starsPrice} ⭐`, `shop:buy:${p.id}`)]);
   buttons.push([Markup.button.callback("Назад", "panel:home")]);
-  await upsertPanel(ctx, "Выберите тариф:", Markup.inlineKeyboard(buttons));
+  await upsertPanel(ctx, "📦 Выберите тариф\n\nПродление суммируется автоматически.", Markup.inlineKeyboard(buttons));
 }
 
 async function renderHelpPanel(ctx: Context) {
   await upsertPanel(
     ctx,
-    "Помощь\n\nЕсли возникли вопросы по оплате или подключению, напишите в поддержку.",
+    "❓ Помощь\n\nЕсли нужна помощь с оплатой или подключением, напишите в поддержку.",
     Markup.inlineKeyboard([
       [Markup.button.url("Поддержка", appConfig.SUPPORT_LINK)],
       [Markup.button.callback("Назад", "panel:home")]
@@ -490,13 +490,12 @@ bot.start(async (ctx) => {
 
 bot.command("help", async (ctx) => {
   await ctx.reply(
-    "Команды:\n" +
-      "/start - главное меню\n" +
-      "/plans - список тарифов\n" +
-      "/trial - пробный период (1 раз)\n" +
-      "/mysub - моя подписка\n" +
-      "/admin - админка (только админ)\n" +
-      "/stats, /orders, /finduser, /grantdays, /revoke, /broadcast, /resettrial - админ-команды"
+    "📚 Команды\n\n" +
+      "/start — главное меню\n" +
+      "/plans — список тарифов\n" +
+      "/trial — пробный период (1 раз)\n" +
+      "/mysub — мой профиль и ключи\n\n" +
+      "Для админа:\n/admin"
   );
 });
 
@@ -528,9 +527,10 @@ bot.command("trial", async (ctx) => {
     });
     await upsertPanel(
       ctx,
-      `Пробный период активирован: ${appConfig.TRIAL_DURATION_HOURS} час, ${appConfig.TRIAL_TRAFFIC_GB} GB.\n` +
-        `Доступ до: ${toMoscow(rwUser.expireAt)} (МСК)\n` +
-        `Ссылка подписки:\n${rwUser.subscriptionUrl}`,
+      `✅ Trial активирован\n\n` +
+        `Лимит: ${appConfig.TRIAL_DURATION_HOURS} ч / ${appConfig.TRIAL_TRAFFIC_GB} GB\n` +
+        `Действует до: ${toMoscow(rwUser.expireAt)} (МСК)\n\n` +
+        `🔗 Ключ:\n${rwUser.subscriptionUrl}`,
       Markup.inlineKeyboard([[Markup.button.callback("Главное меню", "panel:home")]])
     );
   } catch (error: any) {
@@ -588,9 +588,10 @@ bot.action("trial:start", async (ctx) => {
     });
     await upsertPanel(
       ctx,
-      `Пробный период активирован: ${appConfig.TRIAL_DURATION_HOURS} час, ${appConfig.TRIAL_TRAFFIC_GB} GB.\n` +
-        `Доступ до: ${toMoscow(rwUser.expireAt)} (МСК)\n` +
-        `Ссылка подписки:\n${rwUser.subscriptionUrl}`,
+      `✅ Trial активирован\n\n` +
+        `Лимит: ${appConfig.TRIAL_DURATION_HOURS} ч / ${appConfig.TRIAL_TRAFFIC_GB} GB\n` +
+        `Действует до: ${toMoscow(rwUser.expireAt)} (МСК)\n\n` +
+        `🔗 Ключ:\n${rwUser.subscriptionUrl}`,
       Markup.inlineKeyboard([[Markup.button.callback("Главное меню", "panel:home")]])
     );
   } catch (error: any) {
@@ -632,7 +633,9 @@ bot.action(/^shop:buy:(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   await upsertPanel(
     ctx,
-    `Счет выставлен на ${INVOICE_TTL_MINUTES} минут.\nПосле оплаты доступ активируется автоматически.`,
+    `🧾 Счет выставлен\n\n` +
+      `Срок оплаты: ${INVOICE_TTL_MINUTES} минут\n` +
+      `После оплаты доступ активируется автоматически.`,
     Markup.inlineKeyboard([[Markup.button.callback("Назад", "panel:home")]])
   );
 });
@@ -752,10 +755,10 @@ bot.on("message", async (ctx, next) => {
 
     await upsertPanel(
       ctx,
-      "Оплата прошла успешно.\n\n" +
+      "✅ Оплата прошла успешно\n\n" +
         `Тариф: ${product.title}\n` +
-        `Действует до: ${toMoscow(rwUser.expireAt)} (МСК)\n` +
-        `Ссылка подписки:\n${rwUser.subscriptionUrl}`,
+        `Действует до: ${toMoscow(rwUser.expireAt)} (МСК)\n\n` +
+        `🔗 Ключ:\n${rwUser.subscriptionUrl}`,
       Markup.inlineKeyboard([
         [Markup.button.callback("Мой профиль", "sub:my")],
         [Markup.button.callback("Главное меню", "panel:home")]
@@ -780,11 +783,11 @@ bot.command("admin", async (ctx) => {
   }
   const stats = repo.stats();
   await ctx.reply(
-    "Админ-панель:\n" +
-      `- Тарифов: ${stats.products}\n` +
-      `- Оплачено: ${stats.paid}\n` +
-      `- Ожидают: ${stats.pending}\n` +
-      `- Выручка: ${stats.totalRevenueStars} ⭐`,
+    "🛠 Админ-панель\n\n" +
+      `Тарифов: ${stats.products}\n` +
+      `Оплачено: ${stats.paid}\n` +
+      `Ожидают: ${stats.pending}\n` +
+      `Выручка: ${stats.totalRevenueStars} ⭐`,
     adminPanelKeyboard()
   );
 });
@@ -794,7 +797,7 @@ bot.action("admin:stats", async (ctx) => {
   await ctx.answerCbQuery();
   const s = repo.stats();
   await ctx.reply(
-    `Статистика:\n- Оплачено: ${s.paid}\n- В ожидании: ${s.pending}\n- Выручка: ${s.totalRevenueStars}⭐\n- Тарифов: ${s.products}`,
+    `📊 Статистика\n\nОплачено: ${s.paid}\nВ ожидании: ${s.pending}\nВыручка: ${s.totalRevenueStars}⭐\nТарифов: ${s.products}`,
     adminPanelKeyboard()
   );
 });

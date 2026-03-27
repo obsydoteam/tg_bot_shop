@@ -146,6 +146,11 @@ for (const p of plansSeed) {
   `).run(p.code, p.title, p.description, p.starsPrice, p.durationDays, p.trafficLimitGb);
 }
 
+// Backward-compat migration: previous single-plan code can remain in old DB
+// and produce a duplicate "1 month / 30 days" offer in user shop.
+// Keep it in DB history, but disable in storefront.
+db.prepare("UPDATE products SET is_active = 0 WHERE code = ?").run("OBSYDO_MONTH_200");
+
 function mapProduct(row: any): Product {
   return {
     id: row.id,
