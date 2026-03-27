@@ -49,7 +49,7 @@ git init
 git add .
 git commit -m "Initial production-ready OBSYDO VPN bot"
 git branch -M main
-git remote add origin <YOUR_GIT_URL>
+git remote add origin https://github.com/obsydoteam/tg_bot_shop.git
 git push -u origin main
 ```
 
@@ -95,7 +95,7 @@ ufw status
 
 ```bash
 cd /opt
-git clone <YOUR_GIT_URL> tg_bot_shop
+git clone https://github.com/obsydoteam/tg_bot_shop.git tg_bot_shop
 cd tg_bot_shop
 ```
 
