@@ -7,8 +7,18 @@ import { RemnawaveClient } from "./remnawave.js";
 const rw = new RemnawaveClient();
 const bot = new Telegraf(appConfig.BOT_TOKEN);
 const INVOICE_TTL_MINUTES = 10;
+const UI_BTN = {
+  USER_PLANS: "📦 Тарифы",
+  USER_PROFILE: "👤 Профиль",
+  USER_TRIAL: "🎁 Trial",
+  USER_HELP: "❓ Помощь",
+  ADMIN_HOME: "🛠 Админка",
+  ADMIN_FIND: "🔎 Найти",
+  ADMIN_STATS: "📊 Статистика",
+  ADMIN_BROADCAST: "📣 Рассылка"
+} as const;
 
-type AdminDangerAction = "ENABLE" | "DISABLE" | "RESET" | "REVOKE" | "DELETE" | "RESET_TRIAL";
+type AdminDangerAction = "ENABLE" | "DISABLE" | "RESET" | "REVOKE" | "DELETE" | "RESET_TRIAL" | "RESET_TRIAL_UNLOCK";
 type PendingAdminAction = {
   adminId: number;
   targetTelegramId: number;
@@ -105,6 +115,23 @@ function uiCard(title: string, lines: string[] = []): string {
   return [title, "", ...lines].join("\n");
 }
 
+function quickKeyboard(isAdminUser: boolean) {
+  const rows: string[][] = [
+    [UI_BTN.USER_PLANS, UI_BTN.USER_PROFILE],
+    [UI_BTN.USER_TRIAL, UI_BTN.USER_HELP]
+  ];
+  if (isAdminUser) {
+    rows.push([UI_BTN.ADMIN_HOME, UI_BTN.ADMIN_STATS]);
+    rows.push([UI_BTN.ADMIN_FIND, UI_BTN.ADMIN_BROADCAST]);
+  }
+  return Markup.keyboard(rows).resize().persistent();
+}
+
+async function syncQuickKeyboard(ctx: Context) {
+  if (!ctx.from || !ctx.chat) return;
+  await ctx.reply("⌨️ Быстрые кнопки обновлены.", quickKeyboard(isAdmin(ctx)));
+}
+
 async function safeDelete(chatId: number, messageId: number) {
   try {
     await bot.telegram.deleteMessage(chatId, messageId);
@@ -162,6 +189,48 @@ function adminPanelKeyboard() {
   ]);
 }
 
+function adminPanelText() {
+  const stats = repo.stats();
+  return uiCard("🛠 Админ-панель", [
+    `Тарифов: ${stats.products}`,
+    `Оплачено: ${stats.paid}`,
+    `Ожидают: ${stats.pending}`,
+    `Выручка: ${stats.totalRevenueStars} ⭐`
+  ]);
+}
+
+async function renderAdminUserPanel(ctx: Context, tgId: number) {
+  const latest = repo.getLatestPaidOrderForUser(tgId);
+  const rwUser = await rw.getByTelegramId(tgId);
+  const trial = repo.getTrialByTelegramId(tgId);
+  const trialRwUser = trial ? await rw.getByUuid(trial.remnawaveUserUuid).catch(() => null) : null;
+  await upsertPanel(
+    ctx,
+    uiCard(`👤 Пользователь ${tgId}`, [
+      `PAID UUID: ${rwUser?.uuid ?? "-"}`,
+      `TRIAL UUID: ${trial?.remnawaveUserUuid ?? "-"}`,
+      `До: ${toMoscow(rwUser?.expireAt ?? latest?.expiresAt ?? null)}`,
+      `Trial до: ${toMoscow(trialRwUser?.expireAt ?? trial?.expiresAt ?? null)}`,
+      `Последний заказ: ${latest ? `#${latest.id} ${latest.status} ${latest.amountStars}⭐` : "нет"}`,
+      `Trial в БД: ${trial ? "да" : "нет"}`
+    ]),
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback("Enable", `admin:user:${tgId}:ENABLE`),
+        Markup.button.callback("Disable", `admin:user:${tgId}:DISABLE`)
+      ],
+      [
+        Markup.button.callback("Reset", `admin:user:${tgId}:RESET`),
+        Markup.button.callback("Revoke", `admin:user:${tgId}:REVOKE`)
+      ],
+      [Markup.button.callback("Delete", `admin:user:${tgId}:DELETE`)],
+      [Markup.button.callback("Reset trial", `admin:user:${tgId}:RESETTRIAL`)],
+      [Markup.button.callback("+30 дней", `admin:user:${tgId}:GRANT30`)],
+      [Markup.button.callback("Назад", "admin:home")]
+    ])
+  );
+}
+
 function compactId(): string {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -193,6 +262,29 @@ async function requestDangerActionConfirm(
   if (action === "RESET_TRIAL") {
     const trial = repo.getTrialByTelegramId(targetTelegramId);
     if (!trial) {
+      if (repo.hasUsedTrial(targetTelegramId)) {
+        const id = compactId();
+        pendingAdminActions.set(id, {
+          adminId: ctx.from.id,
+          targetTelegramId,
+          targetUuid: "TRIAL_LOCK_ONLY",
+          action: "RESET_TRIAL_UNLOCK",
+          createdAt: Date.now()
+        });
+        await ctx.reply(
+          `Подтвердите действие:\n` +
+            `- action: RESET_TRIAL_UNLOCK\n` +
+            `- telegramId: ${targetTelegramId}\n\n` +
+            "Будет снят только trial lock (без удаления пользователя в Remnawave). Выполнить?",
+          Markup.inlineKeyboard([
+            [
+              Markup.button.callback("Да", `admin:confirm:${id}:yes`),
+              Markup.button.callback("Нет", `admin:confirm:${id}:no`)
+            ]
+          ])
+        );
+        return;
+      }
       await ctx.reply("Активный/зафиксированный trial для этого telegramId не найден в БД.");
       return;
     }
@@ -271,8 +363,23 @@ async function runReconciliation(
     result.checked += 1;
     try {
       let remote = order.remnawaveUserUuid ? await rw.getByUuid(order.remnawaveUserUuid) : null;
+      let fromTelegramFallback = false;
       if (!remote) {
         remote = await rw.getByTelegramId(order.telegramUserId);
+        fromTelegramFallback = Boolean(remote);
+      }
+
+      // When the original UUID is unavailable and we fallback by telegramId,
+      // only accept same/newer expiry candidate to avoid attaching to stale paid account.
+      if (remote && fromTelegramFallback && order.remnawaveUserUuid && order.expiresAt) {
+        const remoteExp = new Date(remote.expireAt).getTime();
+        const localExp = new Date(order.expiresAt).getTime();
+        if (Number.isFinite(remoteExp) && Number.isFinite(localExp) && remoteExp + 5 * 60 * 1000 < localExp) {
+          result.unresolved.push(
+            `#${order.id}: fallback candidate seems older than local expiry (remote=${remote.expireAt}, local=${order.expiresAt})`
+          );
+          continue;
+        }
       }
 
       if (!remote) {
@@ -491,6 +598,7 @@ async function upsertPanel(ctx: Context, text: string, keyboard: ReturnType<type
 }
 
 bot.start(async (ctx) => {
+  await syncQuickKeyboard(ctx);
   await upsertPanel(ctx, mainPanelText(), mainPanelKeyboard());
 });
 
@@ -799,15 +907,98 @@ bot.command("admin", async (ctx) => {
     await transientReply(ctx, "Недостаточно прав.");
     return;
   }
-  const stats = repo.stats();
-  await ctx.reply(
-    uiCard("🛠 Админ-панель", [
-      `Тарифов: ${stats.products}`,
-      `Оплачено: ${stats.paid}`,
-      `Ожидают: ${stats.pending}`,
-      `Выручка: ${stats.totalRevenueStars} ⭐`
+  await syncQuickKeyboard(ctx);
+  await upsertPanel(ctx, adminPanelText(), adminPanelKeyboard());
+});
+
+bot.hears(UI_BTN.USER_PLANS, async (ctx) => {
+  await renderPlansPanel(ctx);
+});
+
+bot.hears(UI_BTN.USER_PROFILE, async (ctx) => {
+  await renderProfilePanel(ctx);
+});
+
+bot.hears(UI_BTN.USER_HELP, async (ctx) => {
+  await renderHelpPanel(ctx);
+});
+
+bot.hears(UI_BTN.USER_TRIAL, async (ctx) => {
+  if (!ctx.from) return;
+  if (repo.hasUsedTrial(ctx.from.id)) {
+    await transientReply(ctx, "Пробный период уже был активирован ранее.");
+    return;
+  }
+  const latest = repo.getLatestPaidOrderForUser(ctx.from.id);
+  if (latest) {
+    await transientReply(ctx, "У вас уже есть покупка в системе, пробный период недоступен.");
+    return;
+  }
+  try {
+    const rwUser = await rw.createTrial({
+      telegramId: ctx.from.id,
+      username: makeUsername(ctx),
+      trialHours: appConfig.TRIAL_DURATION_HOURS
+    });
+    repo.saveTrial({
+      telegramUserId: ctx.from.id,
+      remnawaveUserUuid: rwUser.uuid,
+      expiresAt: rwUser.expireAt
+    });
+    await upsertPanel(
+      ctx,
+      uiCard("✅ Trial активирован", [
+        `Лимит: ${appConfig.TRIAL_DURATION_HOURS} ч / ${appConfig.TRIAL_TRAFFIC_GB} GB`,
+        `Действует до: ${toMoscow(rwUser.expireAt)} (МСК)`,
+        "",
+        "🔗 Ключ:",
+        rwUser.subscriptionUrl
+      ]),
+      Markup.inlineKeyboard([[Markup.button.callback("Главное меню", "panel:home")]])
+    );
+  } catch (error: any) {
+    await transientReply(ctx, "Не удалось активировать пробный период. Напишите в поддержку.");
+    console.error("Trial failed:", error?.response?.data ?? error?.message ?? error);
+  }
+});
+
+bot.hears(UI_BTN.ADMIN_HOME, async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  await upsertPanel(ctx, adminPanelText(), adminPanelKeyboard());
+});
+
+bot.hears(UI_BTN.ADMIN_STATS, async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const s = repo.stats();
+  await upsertPanel(
+    ctx,
+    uiCard("📊 Статистика", [
+      `Оплачено: ${s.paid}`,
+      `В ожидании: ${s.pending}`,
+      `Выручка: ${s.totalRevenueStars} ⭐`,
+      `Тарифов: ${s.products}`
     ]),
-    adminPanelKeyboard()
+    Markup.inlineKeyboard([[Markup.button.callback("Назад", "admin:home")]])
+  );
+});
+
+bot.hears(UI_BTN.ADMIN_FIND, async (ctx) => {
+  if (!isAdmin(ctx) || !ctx.from) return;
+  setAdminInput(ctx.from.id, "FIND_USER");
+  await upsertPanel(
+    ctx,
+    uiCard("🔎 Поиск пользователя", ["Введите telegramId одним сообщением."]),
+    Markup.inlineKeyboard([[Markup.button.callback("Отмена", "admin:home")]])
+  );
+});
+
+bot.hears(UI_BTN.ADMIN_BROADCAST, async (ctx) => {
+  if (!isAdmin(ctx) || !ctx.from) return;
+  setAdminInput(ctx.from.id, "BROADCAST");
+  await upsertPanel(
+    ctx,
+    uiCard("📣 Рассылка", ["Введите текст одним сообщением.", "Отправка: всем платным пользователям."]),
+    Markup.inlineKeyboard([[Markup.button.callback("Отмена", "admin:home")]])
   );
 });
 
@@ -815,21 +1006,22 @@ bot.action("admin:stats", async (ctx) => {
   if (!isAdmin(ctx)) return;
   await ctx.answerCbQuery();
   const s = repo.stats();
-  await ctx.reply(
+  await upsertPanel(
+    ctx,
     uiCard("📊 Статистика", [
       `Оплачено: ${s.paid}`,
       `В ожидании: ${s.pending}`,
       `Выручка: ${s.totalRevenueStars} ⭐`,
       `Тарифов: ${s.products}`
     ]),
-    adminPanelKeyboard()
+    Markup.inlineKeyboard([[Markup.button.callback("Назад", "admin:home")]])
   );
 });
 
 bot.action("admin:help", async (ctx) => {
   if (!isAdmin(ctx)) return;
   await ctx.answerCbQuery();
-  await ctx.reply(adminCommandsHelpText());
+  await upsertPanel(ctx, adminCommandsHelpText(), Markup.inlineKeyboard([[Markup.button.callback("Назад", "admin:home")]]));
 });
 
 bot.action("admin:search-help", async (ctx) => {
@@ -842,14 +1034,22 @@ bot.action("admin:user:lookup", async (ctx) => {
   if (!isAdmin(ctx) || !ctx.from) return;
   await ctx.answerCbQuery();
   setAdminInput(ctx.from.id, "FIND_USER");
-  await ctx.reply("Введите telegramId пользователя одним сообщением.");
+  await upsertPanel(
+    ctx,
+    uiCard("🔎 Поиск пользователя", ["Введите telegramId одним сообщением."]),
+    Markup.inlineKeyboard([[Markup.button.callback("Отмена", "admin:home")]])
+  );
 });
 
 bot.action("admin:broadcast:prompt", async (ctx) => {
   if (!isAdmin(ctx) || !ctx.from) return;
   await ctx.answerCbQuery();
   setAdminInput(ctx.from.id, "BROADCAST");
-  await ctx.reply("Введите текст рассылки одним сообщением. Отправка пойдет всем платным пользователям.");
+  await upsertPanel(
+    ctx,
+    uiCard("📣 Рассылка", ["Введите текст одним сообщением.", "Отправка: всем платным пользователям."]),
+    Markup.inlineKeyboard([[Markup.button.callback("Отмена", "admin:home")]])
+  );
 });
 
 bot.action("admin:products", async (ctx) => {
@@ -874,23 +1074,14 @@ bot.action("admin:orders", async (ctx) => {
           .map((o) => `#${o.id} | ${o.status} | ${o.amountStars}⭐ | user:${o.telegramUserId} | expires:${toMoscow(o.expiresAt)}`)
           .join("\n")
       : "Нет заказов");
-  await ctx.editMessageText(text, Markup.inlineKeyboard([[Markup.button.callback("Назад", "admin:products")]]));
+  await ctx.editMessageText(text, Markup.inlineKeyboard([[Markup.button.callback("Назад", "admin:home")]]));
   await ctx.answerCbQuery();
 });
 
 bot.action("admin:home", async (ctx) => {
   if (!isAdmin(ctx)) return;
   await ctx.answerCbQuery();
-  const stats = repo.stats();
-  await ctx.reply(
-    uiCard("🛠 Админ-панель", [
-      `Тарифов: ${stats.products}`,
-      `Оплачено: ${stats.paid}`,
-      `Ожидают: ${stats.pending}`,
-      `Выручка: ${stats.totalRevenueStars} ⭐`
-    ]),
-    adminPanelKeyboard()
-  );
+  await upsertPanel(ctx, adminPanelText(), adminPanelKeyboard());
 });
 
 bot.action(/^admin:product:(\d+)$/, async (ctx) => {
@@ -1005,8 +1196,10 @@ bot.command("addplan", async (ctx) => {
 bot.command("stats", async (ctx) => {
   if (!isAdmin(ctx)) return;
   const s = repo.stats();
-  await ctx.reply(
-    `Статистика:\n- Оплачено: ${s.paid}\n- В ожидании: ${s.pending}\n- Выручка: ${s.totalRevenueStars}⭐\n- Тарифов: ${s.products}`
+  await upsertPanel(
+    ctx,
+    `Статистика:\n- Оплачено: ${s.paid}\n- В ожидании: ${s.pending}\n- Выручка: ${s.totalRevenueStars}⭐\n- Тарифов: ${s.products}`,
+    Markup.inlineKeyboard([[Markup.button.callback("Назад", "admin:home")]])
   );
 });
 
@@ -1107,33 +1300,7 @@ bot.command("finduser", async (ctx) => {
     await ctx.reply("Формат: /finduser <telegramId>");
     return;
   }
-  const latest = repo.getLatestPaidOrderForUser(tgId);
-  const rwUser = await rw.getByTelegramId(tgId);
-  const trial = repo.getTrialByTelegramId(tgId);
-  const trialRwUser = trial ? await rw.getByUuid(trial.remnawaveUserUuid).catch(() => null) : null;
-  await ctx.reply(
-    `Пользователь ${tgId}\n` +
-      `- PAID UUID: ${rwUser?.uuid ?? "-"}\n` +
-      `- TRIAL UUID: ${trial?.remnawaveUserUuid ?? "-"}\n` +
-      `- До: ${toMoscow(rwUser?.expireAt ?? latest?.expiresAt ?? null)}\n` +
-      `- Trial до: ${toMoscow(trialRwUser?.expireAt ?? trial?.expiresAt ?? null)}\n` +
-      `- Последний заказ: ${latest ? `#${latest.id} ${latest.status} ${latest.amountStars}⭐` : "нет"}\n` +
-      `- Trial в БД: ${trial ? "да" : "нет"}`,
-    Markup.inlineKeyboard([
-      [
-        Markup.button.callback("Enable", `admin:user:${tgId}:ENABLE`),
-        Markup.button.callback("Disable", `admin:user:${tgId}:DISABLE`)
-      ],
-      [
-        Markup.button.callback("Reset", `admin:user:${tgId}:RESET`),
-        Markup.button.callback("Revoke", `admin:user:${tgId}:REVOKE`)
-      ],
-      [Markup.button.callback("Delete", `admin:user:${tgId}:DELETE`)],
-      [Markup.button.callback("Reset trial", `admin:user:${tgId}:RESETTRIAL`)],
-      [Markup.button.callback("+30 дней", `admin:user:${tgId}:GRANT30`)],
-      [Markup.button.callback("Админка", "admin:home")]
-    ])
-  );
+  await renderAdminUserPanel(ctx, tgId);
 });
 
 bot.on("text", async (ctx, next) => {
@@ -1150,33 +1317,7 @@ bot.on("text", async (ctx, next) => {
       await ctx.reply("Нужен telegramId числом.");
       return;
     }
-    const latest = repo.getLatestPaidOrderForUser(tgId);
-    const rwUser = await rw.getByTelegramId(tgId);
-    const trial = repo.getTrialByTelegramId(tgId);
-    const trialRwUser = trial ? await rw.getByUuid(trial.remnawaveUserUuid).catch(() => null) : null;
-    await ctx.reply(
-      `Пользователь ${tgId}\n` +
-        `- PAID UUID: ${rwUser?.uuid ?? "-"}\n` +
-        `- TRIAL UUID: ${trial?.remnawaveUserUuid ?? "-"}\n` +
-        `- До: ${toMoscow(rwUser?.expireAt ?? latest?.expiresAt ?? null)}\n` +
-        `- Trial до: ${toMoscow(trialRwUser?.expireAt ?? trial?.expiresAt ?? null)}\n` +
-        `- Последний заказ: ${latest ? `#${latest.id} ${latest.status} ${latest.amountStars}⭐` : "нет"}\n` +
-        `- Trial в БД: ${trial ? "да" : "нет"}`,
-      Markup.inlineKeyboard([
-        [
-          Markup.button.callback("Enable", `admin:user:${tgId}:ENABLE`),
-          Markup.button.callback("Disable", `admin:user:${tgId}:DISABLE`)
-        ],
-        [
-          Markup.button.callback("Reset", `admin:user:${tgId}:RESET`),
-          Markup.button.callback("Revoke", `admin:user:${tgId}:REVOKE`)
-        ],
-        [Markup.button.callback("Delete", `admin:user:${tgId}:DELETE`)],
-        [Markup.button.callback("Reset trial", `admin:user:${tgId}:RESETTRIAL`)],
-        [Markup.button.callback("+30 дней", `admin:user:${tgId}:GRANT30`)],
-        [Markup.button.callback("Админка", "admin:home")]
-      ])
-    );
+    await renderAdminUserPanel(ctx, tgId);
     return;
   }
 
@@ -1388,6 +1529,8 @@ bot.action(/^admin:confirm:([a-z0-9]+):(yes|no)$/, async (ctx) => {
         if (Number(error?.response?.status) !== 404) throw error;
       }
       repo.deleteTrialByTelegramId(pending.targetTelegramId);
+      repo.deleteTrialUsageByTelegramId(pending.targetTelegramId);
+    } else if (pending.action === "RESET_TRIAL_UNLOCK") {
       repo.deleteTrialUsageByTelegramId(pending.targetTelegramId);
     }
     await ctx.reply(`Выполнено: ${pending.action} для telegramId ${pending.targetTelegramId}.`);

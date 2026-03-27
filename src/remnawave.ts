@@ -87,14 +87,27 @@ export class RemnawaveClient {
     return (data.response ?? []).map((u) => this.mapUser(u));
   }
 
+  private pickBestByExpiry(users: RemnawaveUser[]): RemnawaveUser | null {
+    if (!users.length) return null;
+    const sorted = [...users].sort((a, b) => {
+      const ta = new Date(a.expireAt).getTime();
+      const tb = new Date(b.expireAt).getTime();
+      const va = Number.isFinite(ta) ? ta : 0;
+      const vb = Number.isFinite(tb) ? tb : 0;
+      return vb - va;
+    });
+    return sorted[0] ?? null;
+  }
+
   async getByTelegramId(telegramId: number): Promise<RemnawaveUser | null> {
     // For paid lifecycle operations we must never accidentally target TRIAL users.
     const users = await this.getUsersByTelegramId(telegramId);
     if (!users.length) return null;
-    const paidTagged = users.find((u) => (u.tag ?? "").toUpperCase() === "PAID");
-    if (paidTagged) return paidTagged;
-    const nonTrial = users.find((u) => (u.tag ?? "").toUpperCase() !== "TRIAL");
-    return nonTrial ?? null;
+    const paidTagged = users.filter((u) => (u.tag ?? "").toUpperCase() === "PAID");
+    const bestPaidTagged = this.pickBestByExpiry(paidTagged);
+    if (bestPaidTagged) return bestPaidTagged;
+    const nonTrial = users.filter((u) => (u.tag ?? "").toUpperCase() !== "TRIAL");
+    return this.pickBestByExpiry(nonTrial);
   }
 
   async createUser(input: {
