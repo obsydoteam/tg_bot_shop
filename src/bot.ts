@@ -3,19 +3,29 @@ import type { Context } from "telegraf";
 import { appConfig } from "./config.js";
 import { repo } from "./db.js";
 import { RemnawaveClient } from "./remnawave.js";
-import type { Order } from "./types.js";
+import type { Order, Product } from "./types.js";
 
 const rw = new RemnawaveClient();
 const bot = new Telegraf(appConfig.BOT_TOKEN);
 const INVOICE_TTL_MINUTES = 10;
 
-type AdminDangerAction = "ENABLE" | "DISABLE" | "RESET" | "REVOKE" | "DELETE" | "RESET_TRIAL" | "RESET_TRIAL_UNLOCK";
+type AdminDangerAction =
+  | "ENABLE"
+  | "DISABLE"
+  | "RESET"
+  | "REVOKE"
+  | "DELETE"
+  | "RESET_TRIAL"
+  | "RESET_TRIAL_UNLOCK"
+  | "FORCE_ORDER";
 type PendingAdminAction = {
   adminId: number;
   targetTelegramId: number;
   targetUuid: string;
   action: AdminDangerAction;
   createdAt: number;
+  forceOrderPlanCode?: string;
+  forceOrderTelegramUsername?: string | null;
 };
 const pendingAdminActions = new Map<string, PendingAdminAction>();
 type AdminInputMode = "FIND_USER" | "FIND_ORDERS" | "BROADCAST";
@@ -50,6 +60,17 @@ function makeTrialUsername(ctx: Context): string {
 function makePaidUsername(ctx: Context): string {
   const base = makeBaseUsername(ctx);
   return `paid_${base}`.slice(0, 36);
+}
+
+function makePaidUsernameByIdentity(telegramUserId: number, telegramUsername?: string | null): string {
+  const rawNick = (telegramUsername ?? "tg")
+    .replace(/[^a-zA-Z0-9_]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase()
+    .slice(0, 20);
+  const nick = rawNick.length > 0 ? rawNick : "tg";
+  return `paid_${nick}_${telegramUserId}`.slice(0, 36);
 }
 
 function formatTraffic(gb: number): string {
@@ -153,6 +174,7 @@ function adminCommandsHelpText(): string {
     "/stats - сводная статистика\n" +
     "/orders [N] - последние N заказов\n" +
     "/findorders <telegramId|@username> - найти все заказы пользователя\n" +
+    "/forceorder <telegramId|@username> <planCode> - вручную создать и исполнить оплаченный заказ (с подтверждением)\n" +
     "/finduser <telegramId> - найти пользователя по Telegram ID\n" +
     "/plansadmin - список тарифов с code\n" +
     "/setprice <code> <stars> - изменить цену тарифа\n" +
@@ -329,6 +351,113 @@ async function requestDangerActionConfirm(
       ]
     ])
   );
+}
+
+async function requestForceOrderConfirm(
+  ctx: Context,
+  telegramUserId: number,
+  telegramUsername: string | null,
+  planCode: string
+): Promise<void> {
+  if (!ctx.from || !isAdmin(ctx)) return;
+  const product = repo.getProductByCode(planCode);
+  if (!product || !product.isActive) {
+    await ctx.reply("Тариф не найден или неактивен. Проверьте code в /plansadmin.");
+    return;
+  }
+  const id = compactId();
+  pendingAdminActions.set(id, {
+    adminId: ctx.from.id,
+    targetTelegramId: telegramUserId,
+    targetUuid: "",
+    action: "FORCE_ORDER",
+    createdAt: Date.now(),
+    forceOrderPlanCode: planCode,
+    forceOrderTelegramUsername: telegramUsername
+  });
+  await ctx.reply(
+    `Подтвердите ручную выдачу подписки:\n` +
+      `- telegramId: ${telegramUserId}${telegramUsername ? ` @${telegramUsername}` : ""}\n` +
+      `- тариф: ${product.code} (${product.title})\n` +
+      `- срок: ${product.durationDays} дн, в БД заказа: ${product.starsPrice}⭐\n\n` +
+      "Выполнить?",
+    Markup.inlineKeyboard([
+      [Markup.button.callback("Да", `admin:confirm:${id}:yes`), Markup.button.callback("Нет", `admin:confirm:${id}:no`)]
+    ])
+  );
+}
+
+async function executeForceOrder(
+  ctx: Context,
+  telegramUserId: number,
+  telegramUsername: string | null,
+  product: Product
+): Promise<void> {
+  const payload = `manual:${telegramUserId}:${Date.now()}:${product.id}`;
+  const hadActivePaidBeforePayment = hasActivePaidSubscription(telegramUserId);
+  await ctx.reply(`Выполняю manual-заказ: tg ${telegramUserId}, тариф ${product.code}...`);
+  try {
+    const pending = repo.createPendingOrder({
+      telegramUserId,
+      telegramUsername,
+      productId: product.id,
+      amountStars: product.starsPrice,
+      payload
+    });
+    const trafficBytes = product.trafficLimitGb === 0 ? 0 : product.trafficLimitGb * 1024 * 1024 * 1024;
+    const rwUser = await rw.provisionOrExtend({
+      telegramId: telegramUserId,
+      username: makePaidUsernameByIdentity(telegramUserId, telegramUsername),
+      durationDays: product.durationDays,
+      trafficLimitBytes: trafficBytes
+    });
+    const paid = repo.markOrderPaid({
+      payload,
+      paymentChargeId: `ADMIN_FORCE_${pending.id}_${Date.now()}`,
+      remnawaveUserUuid: rwUser.uuid,
+      remnawaveShortUuid: rwUser.shortUuid,
+      subscriptionUrl: rwUser.subscriptionUrl,
+      expiresAt: rwUser.expireAt
+    });
+    if (!paid) {
+      await ctx.reply("Не удалось завершить заказ (возможно, уже обработан).");
+      return;
+    }
+    repo.upsertTrafficCycleOnPayment({
+      telegramUserId,
+      remnawaveUserUuid: rwUser.uuid,
+      resetAnchor: !hadActivePaidBeforePayment
+    });
+    await ctx.reply(
+      `Готово.\n` +
+        `- order: #${paid.id}\n` +
+        `- user: ${telegramUserId}${telegramUsername ? ` @${telegramUsername}` : ""}\n` +
+        `- plan: ${product.code} (${product.durationDays} дн)\n` +
+        `- exp: ${toMoscow(rwUser.expireAt)}\n` +
+        `- key: ${rwUser.subscriptionUrl}`
+    );
+    try {
+      await bot.telegram.sendMessage(
+        telegramUserId,
+        uiCard("✅ Подписка активирована администратором", [
+          `Тариф: ${product.title}`,
+          `Действует до: ${toMoscow(rwUser.expireAt)} (МСК)`,
+          "",
+          "🔗 Ключ:",
+          rwUser.subscriptionUrl
+        ])
+      );
+    } catch {
+      // User may block bot or never started bot.
+    }
+  } catch (error: any) {
+    repo.markOrderFailed(payload);
+    await ctx.reply(
+      `forceorder error: ${
+        error?.response?.data ? JSON.stringify(error.response.data) : error?.message ?? "unknown"
+      }`
+    );
+  }
 }
 
 type ReconcileResult = {
@@ -1239,6 +1368,39 @@ bot.command("findorders", async (ctx) => {
   await ctx.reply(text);
 });
 
+bot.command("forceorder", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const [, targetRaw = "", planCodeRaw = ""] = ctx.message.text.split(" ");
+  const target = targetRaw.trim();
+  const planCode = planCodeRaw.trim();
+  if (!target || !planCode) {
+    await ctx.reply("Формат: /forceorder <telegramId|@username> <planCode>");
+    return;
+  }
+
+  let telegramUserId: number | null = null;
+  let telegramUsername: string | null = null;
+  const asId = Number(target);
+  if (Number.isFinite(asId)) {
+    telegramUserId = asId;
+  } else {
+    telegramUsername = target.replace(/^@+/, "").toLowerCase();
+    if (!telegramUsername) {
+      await ctx.reply("Некорректный username. Пример: /forceorder @obsydo OBSYDO_1M");
+      return;
+    }
+    telegramUserId = repo.getLatestTelegramIdByUsername(telegramUsername);
+    if (!telegramUserId) {
+      await ctx.reply(
+        "Не удалось определить telegramId по username (нет истории заказов с этим username). Укажите telegramId числом."
+      );
+      return;
+    }
+  }
+
+  await requestForceOrderConfirm(ctx, telegramUserId, telegramUsername, planCode);
+});
+
 bot.command("finduser", async (ctx) => {
   if (!isAdmin(ctx)) return;
   const tgId = Number(ctx.message.text.split(" ")[1]);
@@ -1632,7 +1794,19 @@ bot.action(/^admin:confirm:([a-z0-9]+):(yes|no)$/, async (ctx) => {
   }
 
   try {
-    if (pending.action === "ENABLE") {
+    if (pending.action === "FORCE_ORDER") {
+      const planCode = pending.forceOrderPlanCode;
+      if (!planCode) {
+        await ctx.reply("Внутренняя ошибка: не указан тариф.");
+        return;
+      }
+      const product = repo.getProductByCode(planCode);
+      if (!product || !product.isActive) {
+        await ctx.reply("Тариф больше не доступен или деактивирован. Проверьте /plansadmin.");
+        return;
+      }
+      await executeForceOrder(ctx, pending.targetTelegramId, pending.forceOrderTelegramUsername ?? null, product);
+    } else if (pending.action === "ENABLE") {
       await rw.enableUser(pending.targetUuid);
     } else if (pending.action === "DISABLE") {
       await rw.disableUser(pending.targetUuid);
@@ -1656,7 +1830,9 @@ bot.action(/^admin:confirm:([a-z0-9]+):(yes|no)$/, async (ctx) => {
     } else if (pending.action === "RESET_TRIAL_UNLOCK") {
       repo.deleteTrialUsageByTelegramId(pending.targetTelegramId);
     }
-    await ctx.reply(`Выполнено: ${pending.action} для telegramId ${pending.targetTelegramId}.`);
+    if (pending.action !== "FORCE_ORDER") {
+      await ctx.reply(`Выполнено: ${pending.action} для telegramId ${pending.targetTelegramId}.`);
+    }
   } catch (error: any) {
     await ctx.reply(
       `Ошибка выполнения ${pending.action}: ${

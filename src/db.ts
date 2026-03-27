@@ -755,6 +755,16 @@ export const repo = {
       .all(username, limit);
     return rows.map(mapOrder);
   },
+  getLatestTelegramIdByUsername(usernameRaw: string): number | null {
+    const username = usernameRaw.trim().replace(/^@+/, "").toLowerCase();
+    if (!username) return null;
+    const row = db
+      .prepare(
+        "SELECT telegram_user_id FROM orders WHERE telegram_username IS NOT NULL AND LOWER(telegram_username) = ? ORDER BY id DESC LIMIT 1"
+      )
+      .get(username) as { telegram_user_id: number } | undefined;
+    return row?.telegram_user_id ?? null;
+  },
   setOrderStatus(payload: string, status: OrderStatus): void {
     db.prepare("UPDATE orders SET status = ?, updated_at = ? WHERE payload = ?").run(
       status,
