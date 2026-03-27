@@ -6,8 +6,7 @@ services:
     env_file:
       - .env
     volumes:
-      - ./shop.db:/app/shop.db
-      - ./backups:/app/backups
+      - ./data:/app/data
     healthcheck:
       test: ["CMD", "node", "dist/healthcheck.js"]
       interval: 30s

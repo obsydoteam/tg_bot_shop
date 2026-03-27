@@ -2,6 +2,7 @@
 shop.db
 stress-test.db
 backups/
+data/
 node_modules
 dist
 npm-debug.log

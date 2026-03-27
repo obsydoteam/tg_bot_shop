@@ -115,7 +115,13 @@ nano .env
 - `SHOP_NAME`
 - `SUPPORT_LINK`
 
-### 2.7 Запуск
+### 2.7 Подготовить папку данных
+
+```bash
+mkdir -p data/backups
+```
+
+### 2.8 Запуск
 
 ```bash
 sh deploy.sh
@@ -127,7 +133,7 @@ sh deploy.sh
 docker compose up -d --build
 ```
 
-### 2.8 Проверка
+### 2.9 Проверка
 
 ```bash
 docker compose ps
@@ -189,10 +195,11 @@ docker compose ps
 - `REMNAWAVE_API_TOKEN` (рекомендуемый способ авторизации)
 - `ADMIN_TELEGRAM_IDS`
 - `DATABASE_PATH`
+- `DATABASE_PATH=/app/data/shop.db`
 - `TIMEZONE=Europe/Moscow`
 - `RECONCILE_INTERVAL_MINUTES`
 - `RECONCILE_LIMIT`
-- `DB_BACKUP_DIR`
+- `DB_BACKUP_DIR=/app/data/backups`
 - `DB_BACKUP_INTERVAL_MINUTES`
 - `DB_BACKUP_RETENTION_DAYS`
 
@@ -239,6 +246,7 @@ docker compose ps
 - SQLite: `WAL`, `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`.
 - Уникальность `payment_charge_id` на уровне БД.
 - Фоновый backup БД с ротацией.
+- Основные файлы данных лежат в `./data` на хосте (`shop.db` и `backups`).
 - Reconciliation по расписанию + ручной запуск.
 - Daily summary в 23:00 МСК.
 - Healthcheck контейнера (`node dist/healthcheck.js`).
@@ -275,6 +283,15 @@ docker compose logs -f --tail=200
 - корректность `REMNAWAVE_BASE_URL`
 - рабочий `REMNAWAVE_API_TOKEN`
 - существование/доступность `PUBLIC` internal squad
+
+Если ошибка `SQLITE_CANTOPEN`:
+
+```bash
+mkdir -p data/backups
+chmod 775 data data/backups
+docker compose down
+docker compose up -d --build
+```
 
 ---
 
