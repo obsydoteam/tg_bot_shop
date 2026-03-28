@@ -242,7 +242,9 @@ docker compose ps
 - `/plansadmin`
 - `/setprice <code> <stars>`
 - `/editplan <code>|<title>|<description>|<stars>|<days>|<trafficGb>`
-- `/reconcile`
+- `/reconcile` (PAID + TRIAL подряд)
+- `/reconcilepaid`
+- `/reconciletrial`
 - `/dailyreport`
 
 Опасные действия защищены подтверждением `Да/Нет`.

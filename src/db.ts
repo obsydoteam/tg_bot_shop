@@ -549,6 +549,30 @@ export const repo = {
       createdAt: row.created_at
     }));
   },
+  getAllTrials(limit: number): Trial[] {
+    const rows = db
+      .prepare(
+        `SELECT telegram_user_id, remnawave_user_uuid, expires_at, created_at
+         FROM trials
+         ORDER BY expires_at ASC
+         LIMIT ?`
+      )
+      .all(limit) as Array<{
+      telegram_user_id: number;
+      remnawave_user_uuid: string;
+      expires_at: string;
+      created_at: string;
+    }>;
+    return rows.map((row) => ({
+      telegramUserId: row.telegram_user_id,
+      remnawaveUserUuid: row.remnawave_user_uuid,
+      expiresAt: row.expires_at,
+      createdAt: row.created_at
+    }));
+  },
+  updateTrialExpiresAt(telegramUserId: number, expiresAt: string): void {
+    db.prepare("UPDATE trials SET expires_at = ? WHERE telegram_user_id = ?").run(expiresAt, telegramUserId);
+  },
   upsertTrafficCycleOnPayment(input: {
     telegramUserId: number;
     remnawaveUserUuid: string;

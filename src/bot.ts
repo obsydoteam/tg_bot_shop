@@ -189,7 +189,9 @@ function adminCommandsHelpText(): string {
     "/retryprovision <orderId> - повторить выдачу для оплаченного, но невыданного заказа\n" +
     "/recoverpaid <orderId> - аварийно восстановить зависший PENDING (если оплата реально прошла)\n" +
     "/broadcast <текст> - рассылка платным пользователям\n" +
-    "/reconcile - ручная сверка с Remnawave\n" +
+    "/reconcile - сверка PAID + TRIAL подряд\n" +
+    "/reconcilepaid - только оплаченные заказы vs Remnawave\n" +
+    "/reconciletrial - только trial (таблица trials vs панель; залипшие/истёкшие)\n" +
     "/dailyreport - ручная отправка ежедневной сводки"
   );
 }
@@ -467,7 +469,8 @@ type ReconcileResult = {
   unresolved: string[];
 };
 
-async function runReconciliation(
+/** Сверка PAID: заказы в БД vs пользователь в Remnawave (UUID, срок, ссылка). */
+async function runPaidReconciliation(
   reason: "interval" | "manual" | "daily",
   opts: { notifyOnIssues?: boolean } = {}
 ): Promise<ReconcileResult> {
@@ -534,7 +537,94 @@ async function runReconciliation(
 
   const hasIssues = result.mismatches.length > 0 || result.unresolved.length > 0;
   if (hasIssues && notifyOnIssues) {
-    const header = `Reconcile report (${reason})\nchecked=${result.checked}, fixed=${result.fixed}, unresolved=${result.unresolved.length}`;
+    const header = `Reconcile PAID (${reason})\nchecked=${result.checked}, fixed=${result.fixed}, unresolved=${result.unresolved.length}`;
+    const mismatchText = result.mismatches.length
+      ? `\n\nFixed:\n${result.mismatches.slice(0, 20).join("\n")}`
+      : "";
+    const unresolvedText = result.unresolved.length
+      ? `\n\nUnresolved:\n${result.unresolved.slice(0, 20).join("\n")}`
+      : "";
+    await notifyAdmins(`${header}${mismatchText}${unresolvedText}`);
+  }
+
+  return result;
+}
+
+/**
+ * Сверка TRIAL: строки в `trials` vs Remnawave по UUID.
+ * Убирает «сироты» в БД, добивает истёкшие в панели (как фоновый cleanup), подтягивает expires_at с панели.
+ */
+async function runTrialReconciliation(
+  reason: "manual",
+  opts: { notifyOnIssues?: boolean } = {}
+): Promise<ReconcileResult> {
+  const notifyOnIssues = opts.notifyOnIssues ?? true;
+  const trials = repo.getAllTrials(appConfig.RECONCILE_LIMIT);
+  const result: ReconcileResult = {
+    checked: 0,
+    fixed: 0,
+    mismatches: [],
+    unresolved: []
+  };
+  const cutoffIso = new Date(Date.now() - 60 * 1000).toISOString();
+
+  for (const trial of trials) {
+    result.checked += 1;
+    try {
+      const remote = await rw.getByUuid(trial.remnawaveUserUuid);
+      if (!remote) {
+        repo.deleteTrialByTelegramId(trial.telegramUserId);
+        result.fixed += 1;
+        result.mismatches.push(`tg ${trial.telegramUserId}: удалена строка trials (пользователя нет в RW по UUID)`);
+        continue;
+      }
+
+      const tag = (remote.tag ?? "").toUpperCase();
+      if (tag !== "TRIAL") {
+        result.unresolved.push(
+          `tg ${trial.telegramUserId}: в RW uuid=${remote.uuid} tag=${remote.tag ?? "?"} (ожидался TRIAL) — проверьте вручную`
+        );
+        continue;
+      }
+
+      const remoteExpired = remote.expireAt <= cutoffIso;
+      if (remoteExpired) {
+        try {
+          await rw.revokeSubscription(trial.remnawaveUserUuid).catch(() => undefined);
+          await rw.deleteUser(trial.remnawaveUserUuid);
+        } catch (error: any) {
+          if (Number(error?.response?.status) !== 404) {
+            result.unresolved.push(
+              `tg ${trial.telegramUserId}: не удалось удалить истёкший trial в RW: ${
+                error?.response?.data ? JSON.stringify(error.response.data) : error?.message ?? "unknown"
+              }`
+            );
+            continue;
+          }
+        }
+        repo.deleteTrialByTelegramId(trial.telegramUserId);
+        result.fixed += 1;
+        result.mismatches.push(`tg ${trial.telegramUserId}: удалён истёкший trial в RW + строка trials`);
+        continue;
+      }
+
+      if (trial.expiresAt !== remote.expireAt) {
+        repo.updateTrialExpiresAt(trial.telegramUserId, remote.expireAt);
+        result.fixed += 1;
+        result.mismatches.push(`tg ${trial.telegramUserId}: expires_at в БД синхронизирован с RW`);
+      }
+    } catch (error: any) {
+      result.unresolved.push(
+        `tg ${trial.telegramUserId}: trial reconcile error: ${
+          error?.response?.data ? JSON.stringify(error.response.data) : error?.message ?? "unknown"
+        }`
+      );
+    }
+  }
+
+  const hasIssues = result.mismatches.length > 0 || result.unresolved.length > 0;
+  if (hasIssues && notifyOnIssues) {
+    const header = `Reconcile TRIAL (${reason})\nchecked=${result.checked}, fixed=${result.fixed}, unresolved=${result.unresolved.length}`;
     const mismatchText = result.mismatches.length
       ? `\n\nFixed:\n${result.mismatches.slice(0, 20).join("\n")}`
       : "";
@@ -557,7 +647,7 @@ async function sendDailySummary(reportDateLabel: string, dayStartIso: string, da
   const topProducts = repo.getTopProductsBetween(dayStartIso, dayEndIso, 5);
   const conversion = newOrders > 0 ? ((paidOrders / newOrders) * 100).toFixed(1) : "0.0";
 
-  const reconcile = await runReconciliation("daily", { notifyOnIssues: false });
+  const reconcile = await runPaidReconciliation("daily", { notifyOnIssues: false });
 
   const topProductsBlock = topProducts.length
     ? topProducts.map((p, i) => `${i + 1}) ${p.title} — ${p.count} шт. / ${p.revenue}⭐`).join("\n")
@@ -1739,15 +1829,43 @@ bot.command("recoverpaid", async (ctx) => {
   }
 });
 
-bot.command("reconcile", async (ctx) => {
+bot.command("reconcilepaid", async (ctx) => {
   if (!isAdmin(ctx)) return;
-  await ctx.reply("Запускаю сверку с Remnawave...");
-  const result = await runReconciliation("manual");
+  await ctx.reply("Сверка PAID (заказы vs Remnawave)...");
+  const result = await runPaidReconciliation("manual");
   await ctx.reply(
-    `Готово.\n` +
+    `PAID готово.\n` +
       `- Проверено: ${result.checked}\n` +
       `- Исправлено: ${result.fixed}\n` +
       `- Не решено: ${result.unresolved.length}`
+  );
+});
+
+bot.command("reconciletrial", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  await ctx.reply("Сверка TRIAL (таблица trials vs Remnawave)...");
+  const result = await runTrialReconciliation("manual");
+  await ctx.reply(
+    `TRIAL готово.\n` +
+      `- Проверено: ${result.checked}\n` +
+      `- Исправлено: ${result.fixed}\n` +
+      `- Не решено: ${result.unresolved.length}`
+  );
+});
+
+bot.command("reconcile", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  await ctx.reply("Сверка PAID, затем TRIAL...");
+  const paid = await runPaidReconciliation("manual");
+  const trial = await runTrialReconciliation("manual");
+  await ctx.reply(
+    `Готово.\n\nPAID:\n` +
+      `- Проверено: ${paid.checked}\n` +
+      `- Исправлено: ${paid.fixed}\n` +
+      `- Не решено: ${paid.unresolved.length}\n\nTRIAL:\n` +
+      `- Проверено: ${trial.checked}\n` +
+      `- Исправлено: ${trial.fixed}\n` +
+      `- Не решено: ${trial.unresolved.length}`
   );
 });
 
@@ -2028,9 +2146,9 @@ function startExpiryReminderLoop() {
 
 function startReconciliationLoop() {
   const intervalMs = appConfig.RECONCILE_INTERVAL_MINUTES * 60 * 1000;
-  void runReconciliation("interval");
+  void runPaidReconciliation("interval");
   setInterval(() => {
-    void runReconciliation("interval");
+    void runPaidReconciliation("interval");
   }, intervalMs);
 }
 
