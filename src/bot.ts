@@ -1842,8 +1842,8 @@ bot.action(/^admin:confirm:([a-z0-9]+):(yes|no)$/, async (ctx) => {
     } else if (pending.action === "REVOKE") {
       await rw.revokeSubscription(pending.targetUuid);
     } else if (pending.action === "DELETE") {
+      // Удаляем только PAID-аккаунт (targetUuid). Запись trial в БД и trial в RW не трогаем — отдельно «Reset trial».
       await rw.deleteUser(pending.targetUuid);
-      repo.deleteTrialByTelegramId(pending.targetTelegramId);
       repo.deleteTrafficCycleByTelegramId(pending.targetTelegramId);
     } else if (pending.action === "RESET_TRIAL") {
       try {
