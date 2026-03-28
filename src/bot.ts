@@ -1926,6 +1926,7 @@ function startExpiredUsersCleanupLoop() {
       // Trial cleanup must target only the exact trial account UUID from trials table.
       // Do not infer target by telegramId and do not touch paid lifecycle entities here.
       try {
+        await rw.revokeSubscription(trial.remnawaveUserUuid).catch(() => undefined);
         await rw.deleteUser(trial.remnawaveUserUuid);
       } catch (error: any) {
         if (Number(error?.response?.status) !== 404) {

@@ -231,8 +231,30 @@ export class RemnawaveClient {
     await this.request<ApiActionResponse>("post", `/api/users/${uuid}/actions/reset-traffic`, {});
   }
 
+  /**
+   * Removes user from the panel. Some Remnawave versions leave EXPIRED users visible
+   * after a plain DELETE; we fall back to bulk delete by UUID when needed.
+   */
   async deleteUser(uuid: string): Promise<void> {
-    await this.request<ApiActionResponse>("delete", `/api/users/${uuid}`);
+    let firstError: unknown = null;
+    try {
+      const data = await this.request<any>("delete", `/api/users/${uuid}`);
+      if (data?.response && data.response.isDeleted === false) {
+        await this.request<any>("post", "/api/users/bulk/delete", { uuids: [uuid] });
+      }
+      return;
+    } catch (error: any) {
+      firstError = error;
+      const status = Number(error?.response?.status ?? 0);
+      if (status === 404) {
+        return;
+      }
+    }
+    try {
+      await this.request<any>("post", "/api/users/bulk/delete", { uuids: [uuid] });
+    } catch {
+      throw firstError;
+    }
   }
 
   private async getPublicInternalSquadUuid(): Promise<string | null> {
