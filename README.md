@@ -112,7 +112,8 @@ nano .env
 
 - `BOT_TOKEN`
 - `REMNAWAVE_BASE_URL`
-- `REMNAWAVE_API_TOKEN`
+- `REMNAWAVE_USERNAME` и `REMNAWAVE_PASSWORD` (как в `.env.example`)
+- `REMNAWAVE_API_TOKEN` (желательно; ускоряет запросы и не дергает логин)
 - `ADMIN_TELEGRAM_IDS`
 - `SHOP_NAME`
 - `SUPPORT_LINK`
@@ -194,10 +195,10 @@ docker compose ps
 
 - `BOT_TOKEN`
 - `REMNAWAVE_BASE_URL`
-- `REMNAWAVE_API_TOKEN` (рекомендуемый способ авторизации)
+- `REMNAWAVE_USERNAME` / `REMNAWAVE_PASSWORD` (обязательны для схемы конфига)
+- `REMNAWAVE_API_TOKEN` (рекомендуется; иначе клиент логинится по паре логин/пароль)
 - `ADMIN_TELEGRAM_IDS`
-- `DATABASE_PATH`
-- `DATABASE_PATH=/app/data/shop.db`
+- `DATABASE_PATH` (в Docker обычно `/app/data/shop.db`)
 - `DEFAULT_PLAN_PRICE_STARS=200`
 - `DEFAULT_PLAN_DURATION_DAYS=30`
 - `DEFAULT_TRAFFIC_GB=300`

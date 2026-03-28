@@ -767,11 +767,6 @@ bot.command("trial", async (ctx) => {
     await transientReply(ctx, "Пробный период уже был активирован ранее.");
     return;
   }
-  const latest = repo.getLatestPaidOrderForUser(ctx.from.id);
-  if (latest) {
-    await transientReply(ctx, "У вас уже есть покупка в системе, пробный период недоступен.");
-    return;
-  }
   try {
     const rwUser = await rw.createTrial({
       telegramId: ctx.from.id,
@@ -834,11 +829,6 @@ bot.action("trial:start", async (ctx) => {
   if (!ctx.from) return;
   if (repo.hasUsedTrial(ctx.from.id)) {
     await transientReply(ctx, "Пробный период уже был активирован ранее.");
-    return;
-  }
-  const latest = repo.getLatestPaidOrderForUser(ctx.from.id);
-  if (latest) {
-    await transientReply(ctx, "У вас уже есть покупка в системе, пробный период недоступен.");
     return;
   }
   try {
