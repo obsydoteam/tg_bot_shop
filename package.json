@@ -8,7 +8,8 @@
     "start": "node dist/index.js",
     "docker:up": "docker compose up -d --build",
     "docker:down": "docker compose down",
-    "docker:logs": "docker compose logs -f --tail=200"
+    "docker:logs": "docker compose logs -f --tail=200",
+    "stress:loops": "tsx src/stress-background-loops.ts"
   },
   "keywords": [],
   "author": "",

@@ -2,6 +2,8 @@
 shop.db
 shop.db-*
 stress-test.db
+stress-bg-*.sqlite
+stress-bg-*.sqlite-*
 backups/
 data/
 node_modules
